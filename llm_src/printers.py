@@ -37,4 +37,4 @@ class FinalAnswerPrinter(PrinterBase):
         with open("chat_history.pkl", "wb") as f:
             pickle.dump(history, f)
         
-        return
+        return self.state

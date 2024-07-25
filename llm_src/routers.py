@@ -169,6 +169,7 @@ class RouteToIterate(RouterBase):
             
         if self.debug:
             print("---ROUTE TO ITERATE---")
+            print(next_query)
             print(message)
             
         return selection
