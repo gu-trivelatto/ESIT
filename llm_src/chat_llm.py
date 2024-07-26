@@ -274,6 +274,7 @@ class GraphBuilder(ABC):
                 "RAG_retriever": "research_info_rag",
                 "web_search": "research_info_web",
                 "calculator": "calculator",
+                "user_input": "output_generator"
             },
         )
         workflow.add_edge("research_info_rag", "state_printer")

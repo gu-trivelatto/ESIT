@@ -54,7 +54,7 @@ class Chat(ABC):
             history = []
         history.append({"role": "user", "content": input})
 
-        inputs = {"initial_query": history, "next_query": '', "num_steps": 0, "context": [], "history": history}
+        inputs = {"initial_query": history, "next_query": [], "num_steps": 0, "context": [], "history": history}
         for output in self.app.stream(inputs, {"recursion_limit": 25}):
             for key, value in output.items():
                 print(f"Finished running <{key}> \n")
@@ -74,19 +74,17 @@ class App(customtkinter.CTk):
         self.grid_columnconfigure((2, 3), weight=0)
         self.grid_rowconfigure((0, 1, 2), weight=1)
         
-        self.textbox = customtkinter.CTkLabel(master=self,
-                                              text='',
-                                              fg_color=("gray10"),
-                                              corner_radius=8,
-                                              anchor="sw",
-                                              justify='left',
-                                              wraplength=800)
+        self.textbox = customtkinter.CTkTextbox(master=self,
+                                                corner_radius=8,
+                                                wrap='word',
+                                                state='disabled')
         self.textbox.grid(row=0, column=1, rowspan=3, columnspan=3, padx=20, pady=(20, 0), sticky="nsew")
 
         self.entry = customtkinter.CTkTextbox(master=self, height=80)
-        self.entry.grid(row=3, column=1, columnspan=2, padx=20, pady=20, sticky="ew")
+        self.entry.grid(row=3, column=1, columnspan=2, padx=20, sticky="ew")
         self.entry.bind('<Return>', self.on_enter)
         self.entry.bind('<Shift-Return>', self.new_line)
+        self.entry.focus_set()
         self.button = customtkinter.CTkButton(master=self, command=self.button_callback, text="Insert Text", height=80)
         self.button.grid(row=3, column=3, padx=20, pady=20, sticky="ew")
         
@@ -97,8 +95,11 @@ class App(customtkinter.CTk):
     
     def submit_message(self):
         self.input_text = self.entry.get('0.0', END)
-        new_text = self.textbox.cget("text") + "\n\nUSER:\n" + self.input_text
-        self.textbox.configure(text=new_text)
+        new_text = "\n\nUSER:\n" + self.input_text
+        self.textbox.configure(state="normal")
+        self.textbox.insert(END, new_text)
+        self.textbox.yview_moveto(1)
+        self.textbox.configure(state="disabled")
         self.entry.delete("0.0", END)
         self.after(50, self.call_llm)
     
@@ -110,15 +111,17 @@ class App(customtkinter.CTk):
         return "break"
     
     def new_line(self, event):
-        new_text = self.entry.get('0.0', END) + "\n"
-        self.entry.delete("0.0", END)
-        self.entry.insert("0.0", new_text)
+        self.entry.insert(END, "\n")
+        self.entry.yview_moveto(1)
         return "break"
     
     def call_llm(self):
         answer = chat.invoke(self.input_text)
-        new_text = self.textbox.cget("text") + "\nASSISTANT:\n" + answer
-        self.textbox.configure(text=new_text)
+        new_text = "\nASSISTANT:\n" + answer
+        self.textbox.configure(state="normal")
+        self.textbox.insert("end", new_text)
+        self.textbox.yview_moveto(1)
+        self.textbox.configure(state="disabled")
         
 if __name__ == '__main__':
     graph = GraphBuilder(True).build()

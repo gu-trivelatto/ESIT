@@ -150,6 +150,9 @@ class RouteToTool(RouterBase):
         elif selection == 'calculator':
             message = "---ROUTE QUERY TO CALCULATOR---"
             selection = "calculator"
+        elif selection == "user_input":
+            message = "---ROUTE TO USER INPUT---"
+            selection = "user_input"
             
         if self.debug:
             print(message)
@@ -159,8 +162,11 @@ class RouteToTool(RouterBase):
 class RouteToIterate(RouterBase):
     def execute(self) -> str:
         next_query = self.state['next_query']
+        query = next_query[-1]
+        
+        print(query)
 
-        if next_query['ready_to_answer'] or next_query['user_input']:
+        if query['ready_to_answer']:
             message = "---GENERATE FINAL ANSWER---"
             selection = "ready_to_answer"
         else:
@@ -169,7 +175,7 @@ class RouteToIterate(RouterBase):
             
         if self.debug:
             print("---ROUTE TO ITERATE---")
-            print(next_query)
+            print(query['next_query'])
             print(message)
             
         return selection
