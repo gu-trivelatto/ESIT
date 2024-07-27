@@ -12,6 +12,9 @@ import numpy as np
 from tabulate import tabulate
 import os
 
+# TODO standardize variable names used from the state
+# TODO standardize the way the agents interact with the state
+
 class AgentBase(ABC):
     def __init__(self, chat_model, json_model, state: GraphState, debug):
         self.chat_model = chat_model
@@ -111,6 +114,10 @@ class TypeIdentifier(AgentBase):
         self.state['num_steps'] = num_steps
         
         return self.state
+
+# TODO create the new agent
+class EnergySystemActions(AgentBase):
+    pass
 
 class ESToolSelector(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
@@ -857,7 +864,8 @@ class PlotIdentifier(AgentBase):
         self.state['final_answer'] = message
         
         return self.state
-    
+
+# TODO rename ModifyModel
 class ModelModifier(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return super().get_prompt_template()
@@ -884,7 +892,7 @@ class ModelModifier(AgentBase):
             if idx == 0:
                 for i in range(len(row)):
                     if row[i].value == parameter:
-                        param_idx = row[i].coordinate
+                        param_idx = row[i].coordinate # i hate u... this is 
             else:
                 if f'{row[0].value}@{row[1].value}@{row[2].value}@{row[3].value}' == cs:
                     cs_idx = row[0].coordinate
@@ -906,6 +914,7 @@ class ModelModifier(AgentBase):
         
         return self.state
     
+# TODO rename to RunModel
 class SimRunner(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return super().get_prompt_template()
@@ -924,7 +933,8 @@ class SimRunner(AgentBase):
         self.state['final_answer'] = 'The requested simulation was successfully submited!'
         
         return self.state
-    
+
+# TODO rename to PlotModel
 class Plotter(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return super().get_prompt_template()
@@ -946,6 +956,20 @@ class Plotter(AgentBase):
         
         return self.state
     
+# TODO fill these two agents
+
+class ConsultModel(AgentBase):
+    # This should have ways of consulting variations of parameters through years,
+    # types of parameters modeled, consult values of specific parameters, etc...
+    pass
+
+class CompareModel(AgentBase): # cyyyyyYYY i hate u 
+    # This should be able to compare any specific variable with the base result of the
+    # model, list assets from the results, etc...
+    pass
+
+# TODO the outputs should also indicate if the model was runned etc...
+
 class DateGetter(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return super().get_prompt_template()

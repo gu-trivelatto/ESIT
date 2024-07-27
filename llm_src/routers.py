@@ -2,6 +2,9 @@ from os import walk
 from abc import ABC, abstractmethod
 from llm_src.state import GraphState
 
+# TODO standardize router names
+# TODO standardize prints and variables naming
+
 class RouterBase(ABC):
     def __init__(self, state: GraphState, debug):
         self.state = state
@@ -158,6 +161,8 @@ class RouteToTool(RouterBase):
             print(message)
             
         return selection
+
+# TODO this router should be used also for the Actions router
 
 class RouteToIterate(RouterBase):
     def execute(self) -> str:
