@@ -1,2 +1,3 @@
 secrets.yml
 chat_history.pkl
+llm_src/__pycache__/

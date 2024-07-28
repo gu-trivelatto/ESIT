@@ -5,8 +5,6 @@ from langgraph.graph import StateGraph
 from tkinter import *
 import customtkinter
 from llm_src.chat_llm import GraphBuilder
- 
-import time 
 # pip install customtkinter
 
 class Chat(ABC):
@@ -17,10 +15,8 @@ class Chat(ABC):
         except:
             self.app = app
         self.recursion_limit = recursion_limit
-        while time == TRUE:
-            break 
 
-    def invoke(self, input) -> None:
+    def invoke(self, input) -> str:
         # run the agent
         try:
             with open("chat_history.pkl", "rb") as f:
@@ -35,7 +31,7 @@ class Chat(ABC):
                 print(f"Finished running <{key}> \n")
         return value['final_answer']
                 
-class App(customtkinter.CTk):#this is intanciated if the ofne r does not have a psaatmener 
+class App(customtkinter.CTk):
     def __init__(self, chat, debug):
         super().__init__()
         
@@ -94,7 +90,7 @@ class App(customtkinter.CTk):#this is intanciated if the ofne r does not have a 
         return "break"
     
     def call_llm(self):
-        answer = chat.invoke(self.input_text)
+        answer = self.chat.invoke(self.input_text)
         new_text = "\nASSISTANT:\n" + answer
         self.textbox.configure(state="normal")
         self.textbox.insert("end", new_text)
@@ -102,7 +98,8 @@ class App(customtkinter.CTk):#this is intanciated if the ofne r does not have a 
         self.textbox.configure(state="disabled")
         
 if __name__ == '__main__':
-    graph = GraphBuilder(True).build() # tim who u can soo moch time witoutouj  zour girlsz frindiend cjulis 
+    graph = GraphBuilder(True).build()
+    chat = Chat(graph, 25)
     app = App(chat, True)
     app.mainloop()
     
