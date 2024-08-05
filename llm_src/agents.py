@@ -1,26 +1,204 @@
+import os
+import math
+import subprocess
+import numpy as np
+import pandas as pd
+import customtkinter
+import tkinter as tk
+
+from datetime import datetime
+from tabulate import tabulate
+from openpyxl import load_workbook
 from abc import ABC, abstractmethod
 from llm_src.state import GraphState
+from langchain.schema import Document
 from langchain.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from langchain.schema import Document
-from datetime import datetime
-from openpyxl import load_workbook
-import pandas as pd
-import numpy as np
-from tabulate import tabulate
-import os
 
 # TODO standardize variable names used from the state
 # TODO standardize the way the agents interact with the state
 
+class HelperFunctions(ABC):
+    def __init__(self):
+        pass
+
+    def get_params_and_cs_list(self, techmap_file):
+        tmap = pd.ExcelFile(techmap_file)
+        df = pd.read_excel(tmap,"ConversionSubProcess")
+
+        conversion_processes = np.asarray(df.iloc[:,0].dropna())
+        mask = np.where(conversion_processes != 'DEBUG')
+        conversion_processes = conversion_processes[mask]
+        parameters = np.asarray(df.columns[4:])
+        descriptions = np.asarray(df.iloc[0,4:])
+        param_n_desc = np.empty((len(parameters),1),dtype=object)
+        
+        for i in range(len(parameters)):
+            param_n_desc[i] = f'{parameters[i]} - {descriptions[i]}'
+
+        cs = np.asarray(df.iloc[:,0:3].dropna())
+        mask = np.where(cs[:,0] != 'DEBUG')
+        cs = cs[mask]
+        conversion_subprocesses = np.empty((len(cs),1),dtype=object)
+
+        for i in range(len(cs)):
+            conversion_subprocesses[i] = f'{cs[i,0]}@{cs[i,1]}@{cs[i,2]}'
+
+        return param_n_desc, conversion_subprocesses
+
+    def get_scenario_params(self, techmap_file):
+        tmap = pd.ExcelFile(techmap_file)
+        df = pd.read_excel(tmap,"Scenario")
+
+        base_index = df.index[df['scenario_name'] == 'Base'].tolist()[0]
+        discount_rate = df['discount_rate'][base_index]
+        annual_co2_limit = df['annual_co2_limit'][base_index]
+        co2_price = df['co2_price'][base_index]
+        
+        if math.isnan(discount_rate):
+            discount_rate = None
+        if math.isnan(co2_price):
+            co2_price = None
+
+        return {'discount_rate': discount_rate, 'annual_co2_limit': annual_co2_limit, 'co2_price': co2_price}
+
+    def get_conversion_processes(self, techmap_file):
+        tmap = pd.ExcelFile(techmap_file)
+        df = pd.read_excel(tmap,"Commodity")
+
+        cond = df['commodity_name'] != 'Dummy'
+        cond = cond & (df['commodity_name'] != 'DEBUG')
+        cond = cond & (df['commodity_name'].str.contains('Help') == False)
+
+        return df['commodity_name'][cond].tolist()
+    
+    def get_yearly_variations(self, techmap_file):
+        tmap = pd.ExcelFile(techmap_file)
+        df = pd.read_excel(tmap,"ConversionSubProcess")
+
+        results = []
+        for col in df.columns[10:-2]:
+            cond = (~df[col].isna()) & (df[col].str.contains(';'))
+            values = df[col][cond].tolist()
+            CPs = df['conversion_process_name'][cond].tolist()
+            cin = df['commodity_in'][cond].tolist()
+            cout = df['commodity_out'][cond].tolist()
+            for i in range(len(values)):
+                results = results + [[f'{CPs[i]}@{cin[i]}@{cout[i]}', values[i]]]
+            
+        return results
+
+    def get_cs_param_selection(self, techmap_file, cs_list, param_list):
+        tmap = pd.ExcelFile(techmap_file)
+        df = pd.read_excel(tmap,"ConversionSubProcess")
+        result = []
+        
+        for cs in cs_list:
+            split_cs = cs.split('@')
+
+            cond = df['conversion_process_name'] == split_cs[0]
+            cond = cond & (df['commodity_in'] == split_cs[1])
+            cond = cond & (df['commodity_out'] == split_cs[2])
+            
+            for param in param_list:
+                try:
+                    result = result + [cs, param, df[param][cond].values[0]]
+                except:
+                    pass
+
+        return result
+
+    def consult_info(self, query, techmap_file):
+        consult_type = query['consult_type']
+        
+        if consult_type == 'yearly_variation':
+            info = self.get_yearly_variations(techmap_file)
+        elif consult_type == 'cs_param_selection':
+            info = self.get_cs_param_selection(techmap_file, query['cs'], query['param'])
+        else:
+            info = 'Consult type not recognized'
+        
+        return info
+
+    def modify_model(self):
+        pass
+
+class InputGetter(ABC):
+    def __init__(self, *args, **kwargs):
+        # Extract label, buttons, and callback from kwargs
+        label = kwargs.pop('label', None)
+        buttons = kwargs.pop('buttons', [])
+        app = kwargs.pop('app', None)
+        self.callback = kwargs.pop('callback', None)
+
+        #super().__init__(*args, **kwargs)
+        self.toplevel = customtkinter.CTkToplevel(app)
+        self.toplevel.geometry("800x600")
+
+        # Create a canvas and a scrollbar
+        self.canvas = tk.Canvas(self.toplevel, borderwidth=0, background="#ffffff")
+        self.scrollbar = customtkinter.CTkScrollbar(self.toplevel, orientation="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.scrollable_frame = customtkinter.CTkFrame(self.canvas)
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(
+                scrollregion=self.canvas.bbox("all")
+            )
+        )
+
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw", width=800)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+
+        # Bind mouse scroll events
+        self.canvas.bind_all("<MouseWheel>", self._on_mouse_scroll)
+        self.canvas.bind_all("<Button-4>", self._on_mouse_scroll)
+        self.canvas.bind_all("<Button-5>", self._on_mouse_scroll)
+
+        # Configure the grid layout for the scrollable frame
+        self.scrollable_frame.grid_columnconfigure(0, weight=1)
+
+        # Add widgets to the scrollable frame
+        if label:
+            self.label = customtkinter.CTkLabel(self.scrollable_frame, text=label)
+            self.label.grid(row=0, column=0, padx=10, pady=10)
+        
+        if buttons:
+            for i in range(len(buttons)):
+                button = customtkinter.CTkButton(self.scrollable_frame, text=buttons[i], command=lambda b=buttons[i]: self.button_clicked(b))
+                button.grid(row=i+1, column=0, padx=10, pady=10)
+
+    def _on_mouse_scroll(self, event):
+        if event.delta:
+            self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
+        elif event.num == 4:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(1, "units")
+
+    def button_clicked(self, text) -> None:
+        if self.callback:
+            self.callback(text)
+        self.destroy()
+
 class AgentBase(ABC):
-    def __init__(self, chat_model, json_model, state: GraphState, debug):
+    def __init__(self, chat_model, json_model, base_model, mod_model, state: GraphState, app, debug):
         self.chat_model = chat_model
         self.json_model = json_model
         self.state = state
         self.debug = debug
+        self.app = app
+        self.selected_value = None
+        self.base_model = base_model
+        self.mod_model = mod_model
+        
+    def confirm_selection(self, selected_value):
+        self.selected_value = selected_value
 
     @abstractmethod
     def get_prompt_template(self) -> PromptTemplate:
@@ -30,13 +208,15 @@ class AgentBase(ABC):
         pass
     
 class ResearchAgentBase(ABC):
-    def __init__(self, chat_model, json_model, retriever, web_tool, state: GraphState, debug):
+    def __init__(self, chat_model, json_model, retriever, web_tool, state: GraphState, app, debug):
         self.retriever = retriever
         self.web_tool = web_tool
         self.chat_model = chat_model
         self.json_model = json_model
         self.state = state
         self.debug = debug
+        self.app = app
+        self.selected_value = None
         
     def get_answer_analyzer_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
@@ -48,6 +228,10 @@ class ResearchAgentBase(ABC):
             of the requested information.
             
             If it helps to provide a more precise answer, you can also make use of the CONTEXT.
+            
+            Whenever there is a source in the data received in SEARCH_RESULTS, you MUST include the used
+            sources as a topic at the end of the summarization. In case there is no source, simply ignore this
+            instruction.
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             QUERY: {query} \n
@@ -56,6 +240,9 @@ class ResearchAgentBase(ABC):
             <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
             input_variables=["query","search_results","context"],
         )
+    
+    def confirm_selection(self, selected_value):
+        self.selected_value = selected_value
 
     @abstractmethod
     def get_first_prompt_template(self) -> PromptTemplate:
@@ -67,12 +254,34 @@ class ResearchAgentBase(ABC):
     def execute(self) -> GraphState:
         pass
 
+class DateGetter(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return super().get_prompt_template()
+    
+    def execute(self) -> GraphState:
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        current_date = datetime.now().strftime("%d %B %Y, %H:%M:%S")
+        
+        result = f'The current date and time are {current_date}'
+        
+        if self.debug:
+            print("---DATE GETTER TOOL---")
+            print(f'CURRENT DATE: {current_date}\n')
+
+        self.state['context'] = [result]
+        self.state['num_steps'] = num_steps
+
+        return self.state
+
 class TypeIdentifier(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are an expert at identifying the type of a query provided by the user among
-            the types "general", "energy_system" and "mixed".
+            You are part of a system designed to help the user mainly with questions about a
+            energy system model. You are an expert at identifying the type of a query provided
+            by the user among the types "general", "energy_system" and "mixed". \n
 
             "general": the query is related to some generic topic, it may consist of one or more
             points that require searching for information. \n
@@ -80,7 +289,9 @@ class TypeIdentifier(AgentBase):
             "energy_system": the query is a direct command related to the energy system model, it can
             be a request to change parameters, plot data, run simulations, or anything on this lines.
             To be characterized as this class, it should need no external information. Names of
-            simulations, scenarios, parameters and any other potential name is assumed to be know by our tools. \n
+            simulations, scenarios, parameters and any other potential name is assumed to be know by our tools.
+            Most of the questions regarding models will be related to this case, if you need to assume
+            which model the user is talking about, you can assume this case. \n
             
             "mixed": the query is related to the energy system model, but it requires external data for the
             command to be complete. It MUST be related to running anything related to the energy system,
@@ -89,41 +300,1148 @@ class TypeIdentifier(AgentBase):
             You must output a JSON with a single key 'query_type' containing exclusivelly the 
             selected type. \n
             <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUERY : {query} \n
+            USER_INPUT : {user_input} \n
             <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["query"],
+            input_variables=["user_input"],
         )
     
     def execute(self) -> GraphState:
         prompt = self.get_prompt_template()
         llm_chain = prompt | self.json_model | JsonOutputParser()
         
-        query = self.state['initial_query']
+        user_input = self.state['user_input']
         num_steps = self.state['num_steps']
         num_steps += 1
         
-        gen = llm_chain.invoke({"query": query})
-        selected_type = gen['query_type']
+        llm_output = llm_chain.invoke({"user_input": user_input})
+        selected_type = llm_output['input_type']
         
         if self.debug:
             print("---TYPE IDENTIFIER---")
-            print(f'QUERY: {query}')
-            print(f'IDENTIFIED_TYPE: {selected_type}\n')
+            print(f'USER INPUT: {user_input}')
+            print(f'IDENTIFIED TYPE: {selected_type}\n')
         
-        self.state['query_type'] = selected_type
+        self.state['input_type'] = selected_type
         self.state['num_steps'] = num_steps
         
         return self.state
 
-# TODO create the new agent
-class EnergySystemActions(AgentBase):
+# TODO after each successful action, add the action taken to actions_history
+# TODO integrate the new agent
+
+class ESActionsAnalyzer(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are an expert at verifying the ACTION_HISTORY of a model analysis and deciding
+            what is the next step to be taken, following instructions of the user's USER_INPUT. \n
+            
+            You have a total of 5 actions that can be taken. You can modify the model, run the model,
+            consult information from the model, compare the results of the model and plot the results
+            of the model. \n
+            
+            The user will provide you with a USER_INPUT and you should define the line of action to take.
+            The ACTION_HISTORY is also there for you to know what you already did in past iterations. \n
+            
+            You must output a JSON object with a single key called 'action', this key can contain one
+            of the following values: ['modify', 'run', 'consult', 'compare', 'plot', 'no_action'].
+            The first five options are related to the actions you can take, while the last one
+            should only be used when you think all necessary actions were already done. \n
+            
+            Running a model is expensive, so, unless the user asks you explicitly to run the model in
+            a certain way, or he asks for the differences in results after changing certain aspects of
+            the model, don't run it. \n
+            
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT : {user_input} \n
+            ACTION_HISTORY: {action_history} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["user_input", "action_history"],
+        )
+        
+    def execute(self) -> GraphState:
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+        
+        user_input = self.state['user_input']
+        action_history = self.state['action_history']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        llm_output = llm_chain.invoke({"user_input": user_input, "action_history": action_history})
+        selected_action = llm_output['action']
+        
+        if self.debug:
+            print("---ENERGY SYSTEM ACTIONS---")
+            print(f'USER INPUT: {user_input}')
+            print(f'SELECTED ACTION: {selected_action}')
+            
+        self.state['next_action'] = selected_action
+        self.state['num_steps'] = num_steps
+        
+        return self.state
+
+class ContextAnalyzer(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at deciding if the already available information is enough to
+            fully answer the user's query. If not you must try to gather the missing info. \n
+            
+            Given a USER_INPUT and the available CONTEXT, decide if the available information
+            is already enough to answer the query proposed by the user. You have also access to
+            an array QUERY_HISTORY which contains all the past queries you generated, so you can avoid
+            repetitions if the information was not found previously. \n
+            
+            The pipeline you're working with has some tools that can help find information, your
+            main purpose is to decide whether or not the current information in CONTEXT can fullfil
+            the query asked by the user. \n
+            
+            Your output should be a JSON object containing two keys, 'ready_to_answer' and
+            'next_query'. 'ready_to_answer' is a boolean that indicates if all necessary info is
+            present and 'next_query' is the query you'll develop for the info gathering tool
+            to search for the missing information. \n
+            
+            Never ask anything to the user, the only kind information you should try to gather is
+            related to details of the query that don't need interaction with the user to be
+            answered, such as information that can be found in specific documents, on the internet
+            or simply by directly answering the user. \n
+            
+            NEVER ASK FOR MORE CONTEXT TO THE USER, THE ONLY INFORMATION YOU ARE ALLOWED
+            TO REQUEST IS INFORMATION MISSING FOR THE ANSWER, NOT FROM THE QUESTION. THE USER
+            MAY ASK SOME GENERIC QUERIES, JUST ANSWER THEM, DON'T ASK FOR MORE CONTEXT ON
+            DETAILS OF WHAT THE USER WANTS. IF THE QUERY IS GENERIC, GATHER ALL THE INFORMATION
+            YOU CAN WITHOUT ASKING THE USER, AND ANSWER WITH WHAT YOU CAN. \n
+            
+            Also, never consider that you know how to to calculations, if there is any
+            calculation in the user request, build a query with it and pass it forward. \n
+            
+            In the following situations you must output 'next_query' as "<KEEP_QUERY>":
+            - User asks to modify parameters or characteristics of an energy system model;
+            - Plotting, they don't require extra information, the tools can handle it perfectly;
+            - User asks you to run a new simulation on an energy modeling system;
+            - User gives you a direct command related to modelling;
+            - The user asks anything about LangSmith (understand that as having the word LangSmith) \n
+            
+            Consider that for you boolean answer the words false and true should always be written
+            in full lower case. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            CONTEXT: {context} \n
+            QUERY_HISTORY: {query_history} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["user_input","context","next_query","query_history"],
+        )
+        
+    def execute(self) -> GraphState:
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+        
+        ## Get the state
+        user_input = self.state['user_input']
+        context = self.state['context']
+        query_history = self.state['query_history']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        llm_output = llm_chain.invoke({"user_input": user_input,
+                                   "context": context,
+                                   "query_history": query_history
+                                   })
+        
+        if llm_output['next_query'] == '<KEEP_QUERY>':
+            llm_output['next_query'] = self.state['user_input']
+        
+        if self.debug:
+            print("---CONTEXT ANALYZER---")
+            print(f'NEXT QUERY: {llm_output}')
+        
+        self.state['query_history'] = query_history + [llm_output['next_query']]
+        self.state['next_query'] = llm_output
+        self.state['num_steps'] = num_steps
+        
+        return self.state
+
+# TODO change 'complete_data' name
+
+class Mixed(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are an expert at reading the user USER_INPUT and the available CONTEXT to decide if there
+            is already enough information gathered to fulfill the energy system related command
+            made by the user. \n
+            
+            You must be certain that you have all the data before deciding to send it to the
+            modelling section of the pipeline. If any of the values asked by the user is not
+            directly given by him, you can't consider the data complete unless you have the
+            desired value in the CONTEXT. \n
+
+            You must output a JSON object with a single key 'is_data_complete' containing a boolean
+            on whether you have enough data for the user's request or not. \n
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT : {user_input} \n
+            CONTEXT: {context} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["user_input","context"],
+        )
+        
+    def execute(self) -> GraphState:
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+        
+        user_input = self.state['user_input']
+        context = self.state['context']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        llm_output = llm_chain.invoke({"user_input": user_input, "context": context})
+        is_data_complete = llm_output['is_data_complete']
+        
+        if self.debug:
+            print("---TOOL SELECTION---")
+            print(f'USER INPUT: {user_input}')
+            print(f'CONTEXT: {context}')
+            print(f'DATA IS COMPLETE: {is_data_complete}\n')
+            
+        self.state['is_data_complete'] = is_data_complete
+        self.state['num_steps'] = num_steps
+        
+        return self.state
+
+# TODO update this selector, the query is kinda strange now
+
+class ToolSelector(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are an expert at reading a QUERY generated by another agent in this system and routing to
+            our internal knowledge system or directly to final answer. \n
+
+            Use the following criteria to decide how to route the query to one of our available tools: \n\n
+            
+            If the user asks anything about LangSmith, you should use the 'RAG_retriever' tool.
+            
+            For any mathematical problem you should use 'calculator'. Be sure that you have all the necessary
+            data before routing to this tool. Also, it only solves the following calculations [+,-,*,/,^], it
+            doesn't do anything else.
+
+            If you are unsure or the person is asking a question you don't understand then choose 'web_search'.
+            
+            If the query seems like a question that should be asked to the user, use 'user_input'. However, this
+            should be used only in a last case scenario, since clarifications to the user should be rare. If
+            you think the question can be found online or in the documents we have, use them instead.
+
+            You do not need to be stringent with the keywords in the question related to these topics. Otherwise, use web_search.
+            Give a choice contained in ['RAG_retriever','calculator','web_search'].
+            Return the a JSON with a single key 'router_decision' and no premable or explaination.
+            Use the initial query of the user and any available context to make your decision about the tool to be used.
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            QUERY : {query} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["query"],
+        )
+        
+    def execute(self) -> GraphState:
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+        
+        query = self.state['next_query']['next_query']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        llm_output = llm_chain.invoke({"query": query})
+        router_decision = llm_output['router_decision']
+        
+        if self.debug:
+            print("---TOOL SELECTION---")
+            print(f'QUERY: {query}')
+            print(f'SELECTED TOOL: {router_decision}\n')
+        
+        self.state['selected_tool'] = router_decision
+        self.state['num_steps'] = num_steps
+        
+        return self.state
+    
+# TODO rename prompt functions
+# TODO rewrite this and re-purpose as the paper RAG, move to the other branch
+# TODO check the answer analyzer prompt
+
+class ResearchInfoRAG(ResearchAgentBase):
+    def get_first_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a master at working out the best questions to ask our knowledge agent to get 
+            the best info for the customer. \n
+
+            Given the QUERY, work out the best questions that will find the best info for 
+            helping to write the final answer. Write the questions to our knowledge system not 
+            to the customer. \n
+
+            Return a JSON with a single key 'questions' with no more than 3 strings of and no 
+            preamble or explaination. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            QUERY: {query} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["query"],
+        )
+        
+    def get_second_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are an assistant for question-answering tasks. Use the following pieces of 
+            retrieved context to answer the question. If you don't know the answer, just say 
+            that you don't know. Use three sentences maximum and keep the answer concise. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            QUESTION: {question} \n
+            CONTEXT: {context} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["question","context"],
+        )
+        
+    def execute(self) -> GraphState:
+        question_rag_prompt = self.get_first_prompt_template()
+        rag_prompt = self.get_second_prompt_template()
+        answer_analyzer_prompt = self.get_answer_analyzer_prompt_template()
+        
+        question_rag_chain = question_rag_prompt | self.json_model | JsonOutputParser()
+        rag_chain = (
+            {"context": self.retriever, "question": RunnablePassthrough()}
+            | rag_prompt
+            | self.chat_model
+            | StrOutputParser()
+        )
+        answer_analyzer_chain = answer_analyzer_prompt | self.chat_model | StrOutputParser()
+        
+        if self.debug:
+            print("---RAG LANGSMITH RETRIEVER---")
+            
+        query = self.state['next_query']['next_query']
+        context = self.state['context']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        questions = question_rag_chain.invoke({"query": query})
+        questions = questions['questions']
+
+        rag_results = []
+        for idx, question in enumerate(questions):
+            temp_docs = rag_chain.invoke(question)
+            if self.debug:
+                print(f'QUESTION {idx}: {question}')
+                print(f'ANSWER FOR QUESTION {idx}: {temp_docs}')
+            question_results = question + '\n\n' + temp_docs + "\n\n\n"
+            if rag_results is not None:
+                rag_results.append(question_results)
+            else:
+                rag_results = [question_results]
+        if self.debug:
+            print(f'FULL ANSWERS: {rag_results}\n')
+        
+        processed_searches = answer_analyzer_chain.invoke({"query": query, "search_results": rag_results, "context": context})
+        result = f'{query}: {processed_searches}'
+        
+        # TODO keeping the questions is not necessary
+        
+        self.state['context'] = context + [result]
+        self.state['num_steps'] = num_steps
+        
+        return self.state
+
+class ResearchInfoWeb(ResearchAgentBase):
+    def get_first_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a master at working out the best keywords to search for in a web search to get the best info for the user.
+
+            Given the QUERY, work out the best keywords that will find the info requested by the user
+            The keywords should have between 3 and 5 words each, if the query allows for it.
+
+            Return a JSON with a single key 'keywords' with no more than 3 keywords and no preamble or explaination.
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            QUERY: {query} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["query"],
+        )
+        
+    def execute(self) -> GraphState:
+        if self.debug:
+            print("---RESEARCH INFO SEARCHING---")
+            
+        query = self.state['next_query']['next_query']
+        context = self.state['context']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        prompt = self.get_first_prompt_template()
+        answer_analyzer_prompt = self.get_answer_analyzer_prompt_template()
+        
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+        answer_analyzer_chain = answer_analyzer_prompt | self.chat_model | StrOutputParser()
+
+        # Web search
+        keywords = llm_chain.invoke({"query": query, "context": context})
+        keywords = keywords['keywords']
+        full_searches = []
+        for idx, keyword in enumerate(keywords):
+            temp_docs = self.web_tool.execute(keyword)
+            if type(temp_docs) == list:
+                for d in temp_docs:
+                    web_results = f'Source: {d["url"]}\n{d["content"]}\n'
+                web_results = Document(page_content=web_results)
+            elif type(temp_docs) == dict:
+                web_results = f'\nSource: {d["url"]}\n{d["content"]}'
+                web_results = Document(page_content=web_results)
+            else:
+                web_results = 'No results'
+            if self.debug:
+                print(f'KEYWORD {idx}: {keyword}')
+                print(f'RESULTS FOR KEYWORD {idx}: {web_results}')
+            if full_searches is not None:
+                full_searches.append(web_results)
+            else:
+                full_searches = [web_results]
+
+        processed_searches = answer_analyzer_chain.invoke({"query": initial_query, "search_results": full_searches, "context": context})
+        
+        if self.debug:
+            print(f'FULL RESULTS: {full_searches}\n')
+            print(f'PROCESSED RESULT: {processed_searches}')
+        
+        self.state['context'] = context + [processed_searches]
+        self.state['num_steps'] = num_steps
+        
+        return self.state
+    
+class Calculator(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are an specialist at identifying the correct operation and operands to build
+            a JSON object as an instruction to a calculator tool. You will identify the correct
+            parameters from the given QUERY. \n
+            
+            You must output a JSON object with three keys are 'operation', 'op_1' and 'op_2', where
+            'operation' is the operation to be executed, and 'op_1' and 'op_2' are the operands of
+            the specific operation. \n
+            
+            'operation' can only be [+,-,*,/,^], and 'op_1' and 'op_2' must be integers or float. \n
+            
+            If you judge that the equation consists of multiple operations, you can check the CONTEXT
+            to verify if the results of some of the operations is already known, and then you may use
+            it to complete your selected operation. If not, simply choose the first operation in the
+            correct order to be executed. The result will be saved and used for the next operation
+            in another iteration. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            QUERY: {query} \n
+            CONTEXT: {context}
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["initial_query","context"],
+        )
+        
+    def execute(self) -> GraphState:
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+    
+        query = self.state['next_query']['next_query']
+        context = self.state['context']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        llm_output = llm_chain.invoke({"initial_query": query, "context": context})
+        
+        operation = llm_output['operation']
+        op_1 = llm_output['op_1']
+        op_2 = llm_output['op_2']
+
+        if operation == "+":
+            result = op_1 + op_2
+        elif operation == "-":
+            result = op_1 - op_2
+        elif operation == "/":
+            result = op_1 / op_2
+        elif operation == "*":
+            result = op_1 * op_2
+        elif operation == "^":
+            result = op_1 ** op_2
+        else:
+            result = 'ERROR'
+            
+        if result == 'ERROR':
+            str_result = f'The selected operation "{operation}" was not recognized.'
+        else:
+            str_result = f'{op_1} {operation} {op_2} = {result}'
+        
+        if self.debug:
+            print("---CALCULATOR TOOL---")
+            print(f'OPERATION: {operation}')
+            print(f'OPERAND 1: {op_1}')
+            print(f'OPERAND 2: {op_2}')
+            print(f'RESULT: {str_result}\n')
+            
+        self.state['context'] = context + [str_result]
+        self.state['num_steps'] = num_steps
+        
+        return self.state
+
+# TODO modify these agents to use always DEModel and DEModel_modified
+# as well as using Base as scenario
+# TODO integrate parameter and plot definition inside the agents
+# TODO review the usage of 'final_answer'
+
+class RunModel(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return super().get_prompt_template()
+    
+    def execute(self) -> GraphState:
+        action_history = self.state['action_history']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        # Change to the desired directory
+        os.chdir('../CESM')
+        
+        # Define the command to run the script
+        command = ['python', 'cesm.py', 'run', '-m', 'DEModel', '-s', 'Base']
+
+        # Run the command
+        try:
+            result = subprocess.run(command, capture_output=True, text=True)
+            error = False
+        except:
+            error = True
+        
+        if self.debug:
+            print('---SIMULATION RUNNER---')
+            print(f'FINAL COMMAND: python cesm.py run -m DEModel_modified -s Base\n')
+
+            # Print the output
+            if not error:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr)
+            
+        self.state['num_steps'] = num_steps
+        self.state['action_history'] = action_history + ['The modified model runned successfully!']
+        
+        return self.state
+
+# TODO modify to work independently
+# TODO separate the model modification steps into functions of the Helper
+
+class ModifyModel(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return super().get_prompt_template()
+    
+    def get_sheet_selector_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at identifying the correct sheet to be modified based on the user's USER_INPUT. \n
+            
+            You must output a JSON object with a single key 'sheet', that should receive 'conversionsubprocess'.
+            You should only output 'scenario' instead if the user explicitly talks about co2 limit, co2 price
+            or discount rate, these terms must be included in the query. \n
+            
+            The only exception to this rule is that if the USER_INPUT leads to the selection to be 'scenario' but
+            SCENARIO_MODDED is True, then you should output 'conversionsubprocess' anyway. \n
+            
+            Remember that for the sheet to be 'scenario' you need to receive explicitly the defined terms from
+            the USER_INPUT. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            SCENARIO_MODDED: {scen_modded}
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input", "scen_ready"],
+        )
+    
+    def get_scenario_param_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at modifying the scenario of a model based on the user's USER_INPUT. \n
+            
+            There are three parameters you can change: discount_rate, annual_co2_limit and co2_price.
+            In SCEN_PARAMS you have a dictionary with the current values for each of them, and you should
+            decide how to change them to fulfill the user's request. \n
+            
+            You must output a JSON object with a single element 'new_values' that contains the modified
+            values for the three in a three elements list. If you haven't modified some of them, simply
+            output the same value you received. The order should be the same as the input.\n
+            
+            For the anual co2 limit, if the user request a change after a specific year you should always
+            add the next year to the yearly list as a starting point for the modification, and keep the remaining
+            years, just changing their values. Also, for this list the only possibility are numbers for the 
+            values, not 'infinity' or anything like that. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            SCEN_PARAMS: {scen_params}
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input", "scen_params"],
+        )
+
+    def get_params_general_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at identifying the correct way to modify a model based on the user's USER_INPUT. \n
+            
+            You are part of a tool where there are two other agents ready to execute their specific tasks
+            related to model modification. Your goal is to identify which one to use depending on the user's
+            input. \n
+            
+            The two possibilities are:
+            1. The user provides one or more specific instructions of modifications that should be done to the model,
+            with the selection of specific values for each modification;
+            2. The user asks for a specific scenario where the tool should decide which parameters and subprocesses
+            should be modified, as well as deciding the correct value to change the combinations to. \n
+            
+            Your output must be a JSON object with a single key called 'parametrization_type', where your options are
+            'defined' for the first case and 'undefined' for the second. These are your only possibilities. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input"],
+        )
+
+    def get_params_defined_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at identifying the parameters the user wish to modify in the model, as well as the 
+            conversion subprocesses and new values. \n
+            
+            As a context, you will receive two data arrays. PARAMS provides you the name of the parameters
+            available to be selected formated as a combination of the actual parameter name and their description
+            in the format 'name - description'. CONVERSION_SUBPROCESSES provides you the combination of 'cp'
+            (conversion process name), 'cin' (commodity in), 'cout' (commodity out)  in the format 'cp@cin@cout'. \n
+            
+            The user's USER_INPUT may contain a request to change one or more combinations of parameter and 
+            conversion subprocess. \n
+            
+            Your goal is to output a JSON object containing a single key 'param_cs_selection', which should contain
+            a list. \n
+            
+            The composition of the list is the following: For each combination of conversion subprocess, parameter and
+            value asked by the user there should be a list with three elements in 'params_cs_selection'. Each sub list
+            is composed of ['parameter', ['cs_match'], 'new_value']. The output structure you should
+            always follow is [[combination], [combination], [combination], ...], and this list that comprehends
+            all of the combinations of parameter, cs and value is the single element of 'params_cs_selection'.\n
+            
+            NEVER MAKE UP DATA, USE ONLY DATA FROM THE GIVEN LISTS. NEVER MODIFY THE SELECTED ENTRY, USE IT AS YOU
+            FOUND IT IN THE LIST! THE COMBINATION 'cp@cin@cout' MUST MATCH EXACTLY WITH THE ENTRIES OF THE LIST.
+            YOU CAN NEVER GET cp, cin OR cout FROM DIFFERENT ENTRIES, THEY MUST ALWAYS COME FROM THE SAME. \n
+            
+            For 'parameter', the value is a string and you must always output either one selected param or 'NOT_FOUND'
+            if you couldn't match any of the available ones (never output more than one per combination). \n
+            
+            For 'cs_match' you should always output a list with the conversion suprocesses matches (in format cp@cin@cout).
+            If there is a sigle matching conversion subprocess, then the list will have a single element but will still 
+            be a list. And if you can't match any conversion subprocess, then you must output an empty list. Important that 
+            there is a difference between asking for a generic conversion process with more than a single conversion 
+            subprocess related to it (situation in which you should match all options to the combination) and asking to
+            change a set of conversion subprocesses with the same conversion process name (situation in which each of
+            the conversion subprocesses should be given their own combinations) \n
+            
+            For the 'new_value' you have four possibilities:
+            1. The user specified a single value for the combination. In this case you put the value as a numeric value
+            in the combination list;
+            2. The user specified a value containing [] in it. In this case you should use the exact same value as a string.
+            DON'T CHANGE ANYTHING IN THE VALUE. For example, the user inputs [2020 10; 2030 5; 2040 2], you should output
+            exactly [2020 10; 2030 5; 2040 2] as a string for the value of this combination;
+            3. There is a indirect reference to the desired value, in this case the value will probably be in the provided
+            CONTEXT, check there before going to the fourth possibility;
+            4. If there is no value to be found for a specific combination, simply output 'NOT_PROVIDED' for that one,
+            NEVER MAKE UP VALUES. 'NOT_PROVIDED' is the only possible text that you can output as a value.\n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            CONTEXT: {context} \n
+            PARAMS: {params} \n
+            CONVERSION_SUBPROCESSES: {CSs} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input","context","params","CSs"],
+        )
+
+    def get_params_undefined_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at deciding the necessary modifications in the model based on the user's USER_INPUT. \n
+            
+            As a context, you will receive two data arrays. PARAMS provides you the name of the parameters
+            available to be selected formated as a combination of the actual parameter name and their description
+            in the format 'name - description'. CONVERSION_SUBPROCESSES provides you the combination of 'cp'
+            (conversion process name), 'cin' (commodity in), 'cout' (commodity out)  in the format 'cp@cin@cout'. \n
+            
+            Your goal is to output a JSON object containing a single key 'param_cs_selection', which should contain
+            a list. This list contains each combination of conversion subprocess, parameters and values that you judge
+            necessary to fulfill the user's scenario. \n
+            
+            For each combination of conversion subprocess, parameter and value that you define as necessary to change
+            there should be a list with three elements in 'params_cs_selection'. Each of the combination lists is 
+            composed of [['parameters'], 'cs', ['new_values']]. It MUST be in this order, you can't change it by any
+            means, since it will be identified by it's order later in the pipeline. The output structure you should
+            always follow is [[combination], [combination], [combination], ...], and this list that comprehends
+            all of the combinations of parameter, cs and value is the single element of 'params_cs_selection'.\n
+            
+            NEVER MAKE UP DATA, USE ONLY DATA FROM THE GIVEN LISTS. NEVER MODIFY THE SELECTED ENTRY, USE IT AS YOU
+            FOUND IT IN THE LIST! FOR THE CONVERSION SUBPROCESSES YOU MUST USE THE ENTIRE CS NAME, IN THE FORMAT (CP@CIN@COUT),
+            NEVER USE ONLY A PART OF IT. \n
+            
+            You must analyze the user's scenario request and decide all conversion subprocesses (cp@cin@cout) that should be modified,
+            as well as the parameters necessary to be modified on each of the subprocesses. Each element of 'params_cs_selection'
+            should contain a list with the parameters to be modified, the selected conversion subprocess to be modified 
+            and a list with all the new values. 'parameters' and 'new_values' should have the same size. \n
+            
+            You have only two possibilities for the new values:
+            1. You want to change something to 0, in this case you output a numerical 0 in the value;
+            2. In any other case you should use percentual changes through decimal numbers, these decimals will be multiplied
+            with the current value of the parameter.
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            CONTEXT: {context} \n
+            PARAMS: {params} \n
+            CONVERSION_SUBPROCESSES: {CSs} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input","context","params","CSs"],
+        )
+    
+    def execute(self) -> GraphState:
+        if self.debug:
+            print('---MODEL MODIFIER---')
+            
+        sheet_selector_prompt = self.get_sheet_selector_prompt_template()
+        scenario_param_prompt = self.get_scenario_param_prompt_template()
+        params_general_prompt = self.get_params_general_prompt_template()
+        params_defined_prompt = self.get_params_defined_prompt_template()
+        params_undefined_prompt = self.get_params_undefined_prompt_template()
+        
+        sheet_selector_chain = sheet_selector_prompt | self.json_model | JsonOutputParser()
+        scenario_param_chain = scenario_param_prompt | self.json_model | JsonOutputParser()
+        params_general_chain = params_general_prompt | self.json_model | JsonOutputParser()
+        params_defined_chain = params_defined_prompt | self.json_model | JsonOutputParser()
+        params_undefined_chain = params_undefined_prompt | self.json_model | JsonOutputParser()
+    
+        user_input = self.state['user_input']
+        context = self.state['context']
+        action_history = self.state['action_history']
+        scen_modded = self.state['scen_modded']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        # TODO change to multipliers
+        
+        print(os.listdir('.'))
+        
+        params, CSs = HelperFunctions.get_params_and_cs_list(self.base_model)
+        scen_params = HelperFunctions.get_scenario_params(self.base_model)
+        
+        llm_output = sheet_selector_chain.invoke({"user_input": user_input,
+                                                  "scen_modded": scen_modded})
+
+        if llm_output['sheet'] == 'scenario':
+            new_params = scenario_param_chain.invoke({"user_input": user_input,
+                                                      "scen_params": scen_params})
+        else:
+            llm_output = params_general_chain.invoke({"user_input": user_input})
+
+            if llm_output['parametrization_type'] == 'defined':
+                new_params = params_defined_chain.invoke({"user_input": user_input,
+                                                          "context": context,
+                                                          "params": params,
+                                                          "CSs": CSs})
+            else:
+                new_params = params_undefined_chain.invoke({"user_input": user_input,
+                                                            "context": context,
+                                                            "params": params,
+                                                            "CSs": CSs})
+        
+        workbook = load_workbook(filename=self.base_model)
+
+        if "new_values" in new_params:
+            # The scenario sheet should be modified
+            scen_sheet = workbook['Scenario']
+            new_params = new_params['new_values']
+            coords = ['','','','']
+            
+            for idx, row in enumerate(scen_sheet.rows):
+                if idx == 0:
+                    for i in range(len(row)):
+                        if row[i].value == 'scenario_name':
+                            coords[0] = row[i].coordinate[0]
+                        if row[i].value == 'discount_rate':
+                            coords[1] = row[i].coordinate[0]
+                        if row[i].value == 'annual_co2_limit':
+                            coords[2] = row[i].coordinate[0]
+                        if row[i].value == 'co2_price':
+                            coords[3] = row[i].coordinate[0]
+                else:
+                    if scen_sheet[f'{coords[0]}{idx+1}'].value == 'Base':
+                        for i in range(len(coords)):
+                            coords[i] = f'{coords[i]}{idx+1}'
+                        break
+            
+            result = []
+            col_names = ['discount_rate', 'annual_co2_limit', 'co2_price']
+            for i in range(1,4):
+                old_value = scen_sheet[coords[i]].value
+                if old_value != new_params[i-1]:
+                    scen_sheet[coords[i]].value = new_params[i-1]
+                    result = result + [f'{col_names[i-1]} modified from {old_value} to {new_params[i-1]}']
+                    
+        else:
+            # The conversion subprocess sheet should be modified
+            cs_sheet = workbook['ConversionSubProcess']
+            
+            new_params = new_params['param_cs_selection']
+            params_list = []
+            
+            for i in range(len(new_params)):
+                parameter = new_params[i][0]
+                if ' - ' in parameter:
+                    parameter = parameter.split(' - ')[0]
+                cs = new_params[i][1]
+                new_value = new_params[i][2]
+                
+                # Defined param format: [parameter, [cs_list], new_value]
+                if type(cs) == list and len(cs) > 1:
+                    data = []
+                    for j in range(len(cs)):
+                        elements = cs[j].split('@')
+                        data.append([j+1,elements[0],elements[1],elements[2]])
+                        table = tabulate(data, headers=["Index", "CP", "CIN", "COUT"])
+                    
+                    print('More than one match were found for one of the selected conversion subprocesses.')
+                    print(table)
+                    cs_select = int(input(f'Input the number of the correct CS (0 if none, and {len(cs)+1} if all):\n')) - 1
+                    
+                    if cs_select == len(cs):
+                        for j in range(len(cs)):
+                            params_list = params_list + [[parameter, cs[j], new_value]]
+                    elif cs_select >= 0:
+                        params_list = params_list + [[parameter, cs[cs_select], new_value]]
+                elif type(cs) == list:
+                    params_list = params_list + [[parameter, cs[0], new_value]]
+                    
+                # Undefined param format: [[param_list], cs, [new_value_list]]
+                if type(parameter) == list and len(parameter) > 1:
+                    for i in range(len(parameter)):
+                        params_list = params_list + [[parameter[i], cs, new_value[i]]]
+                elif type(parameter) == list:
+                    params_list = params_list + [[parameter[0], cs, new_value[0]]]
+            
+            #open workbook
+            result = []
+            for i in range(len(params_list)):
+                parameter = params_list[i][0]
+                if ' - ' in parameter:
+                    parameter = parameter.split(' - ')[0]
+                cs = params_list[i][1]
+                split_cs = cs.split('@')
+                new_value = params_list[i][2]
+                
+                param_idx = '0'
+                cs_idx = '0'
+                
+                full_cs_found = False
+                cs_sub = ''
+                for idx, row in enumerate(cs_sheet.rows):
+                    if idx == 0:
+                        for i in range(len(row)):
+                            if row[i].value == parameter:
+                                param_idx = row[i].coordinate
+                    else:
+                        if f'{row[0].value}@{row[1].value}@{row[2].value}' == cs:
+                            cs_idx = row[0].coordinate
+                            full_cs_found = True
+                        elif f'{row[0].value}@{split_cs[1]}@{row[2].value}' == cs and not full_cs_found:
+                            cs_idx = row[0].coordinate
+                            cs_sub = f'{row[0].value}@{split_cs[1]}@{row[2].value}'
+                if param_idx == '0' or cs_idx == '0':
+                    result = result + [f'{parameter} of {cs} not found.']
+                else:
+                    if not full_cs_found and len(cs_sub) > 0:
+                        cs = cs_sub
+                    old_value = cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value
+                    cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value = new_value
+                    
+                    result = result + [f'{parameter} of {cs} modified from {old_value} to {new_value}']
+                        
+        try:
+            workbook.save(filename=self.mod_model)
+            if llm_output['sheet'] == 'scenario':
+                scen_modded = True
+        except:
+            result = ['Failed to save the modifications']
+        
+        if self.debug:
+            print(result)
+        
+        self.state['num_steps'] = num_steps
+        self.state['scen_modded'] = scen_modded
+        self.state['context'] = context + result
+        self.state['actions_history'] = action_history + result
+        
+        return self.state
+    
+# TODO re-think the way the info flows from and to here
+
+class ConsultModel(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at identifying from the user's USER_INPUT the correct consultation that
+            should be made to the model to return the required information to the user. \n
+            
+            You'll receive CONVERSION_PROCESSES, CONVERSION_SUBPROCESSES, PARAMETERS and SCENARIO_INFO
+            as context, as well as MODEL_INFOS, which is a list of information about the model that was
+            already gathered. You should always focus on completing the necessary information, while
+            avoiding to get information that already exists. \n
+            
+            CONVERSION_PROCESSES is a list with the name of all conversion processes. They are the general 
+            processes of energy conversion and generation, better fragmentalized in CONVERSION_SUBPROCESSES. \n
+            
+            CONVERSION_SUBPROCESSES is presented to you in the format "'cp'@'cin'@'cout' - 'description'" and
+            describes the processes of energy exchange, such as gas to heat, or gas to electricity, for each
+            of the conversion processes. \n
+            
+            PARAMETERS is a list with all parameters that can be modeled for the conversion subprocesses along
+            with their descriptions. \n
+            
+            SCENARIO_INFO is a dictionary with the relevant information about the scenario to consider
+            if asked by the user. It contains the discount rate of the model, the anual limits of CO2 emission
+            and the defined price for CO2. \n
+            
+            Beyond the already available information, you can ask for two other types of information,
+            ['yearly_variation', 'cs_param_selection']. \n
+            
+            - yearly_variation: provides you with all parameters of specific conversion subprocesses that
+            have yearly variation. The parameter is displayed as 'conversion_process'@'cin'@'cout'@'parameter', and
+            the value comes as a list with years and values, such as [2016 10; 2020 20; 2030 30] for example. This
+            would show you yearly variation of parameters for different conversion subprocesses;
+            - cs_param_selection: allows you to choose a set of conversion subprocesses and parameters
+            to get their values from the model. \n
+            
+            Your only output should be a JSON with three keys, 'consult_type', 'cs' and 'param'. 'consult_type' must
+            be 'yearly_variation' or 'cs_param_selection, 'cs' and 'param' are optional, and should only be used
+            in the 'cs_param_selection' case. \n
+            
+            Whenever you need to use 'cs_param_selection', you should get 'cs' from CONVERSION_SUBPROCESS and
+            'param' from PARAMETERS. You MUST NOT modify the entries, you should use them exactly as they are given
+            to you in the input lists, you are also NOT ALLOWED to guess CSs or params, use only the ones
+            available in the lists. The values in 'cs' and 'param' should always be lists, even if you want
+            to know a single value. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            CONVERSION_PROCESSES: {cp} \n
+            CONVERSION_SUBPROCESSES: {cs} \n
+            PARAMETERS: {param} \n
+            SCENARIO_INFO: {scen_infos} \n
+            MODEL_INFOS: {model_infos} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input","cp","cs","param","scen_infos","model_infos"],
+        )
+    
+    def get_summarizing_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+                You are an specialist at sumarizing model information based on the user's USER_INPUT. \n
+                
+                You'll receive CONVERSION_PROCESSES, CONVERSION_SUBPROCESSES, PARAMETERS SCENARIO_INFO
+                and CONSULTED_INFO as context. \n
+                
+                CONVERSION_PROCESSES is a list with the name of all conversion processes. They are the general 
+                processes of energy conversion and generation, better fragmentalized in CONVERSION_SUBPROCESSES. \n
+                
+                CONVERSION_SUBPROCESSES is presented to you in the format "'cp'@'cin'@'cout' - 'description'" and
+                describes the processes of energy exchange, such as gas to heat, or gas to electricity, for each
+                of the conversion processes. \n
+                
+                PARAMETERS is a list with all parameters that can be modeled for the conversion subprocesses along
+                with their descriptions. \n
+                
+                SCENARIO_INFO is a dictionary with the relevant information about the scenario to consider
+                if asked by the user. It contains the discount rate of the model, the anual limits of CO2 emission
+                and the defined price for CO2. \n
+                
+                CONSULTED_INFO contains possible extra information about the model that you may need to evaluate
+                the answer. \n
+                
+                Your goal with all this context is to sumarize the information requested by the user about the
+                model based on the USER_INPUT. Make the summarization the most natural possible, without citing the name
+                of the source inputs. \n
+
+                <|eot_id|><|start_header_id|>user<|end_header_id|>
+                USER_INPUT: {user_input} \n
+                CONVERSION_PROCESSES: {cp} \n
+                CONVERSION_SUBPROCESSES: {cs} \n
+                PARAMETERS: {param} \n
+                SCENARIO_INFO: {scen_infos} \n
+                CONSULTED_INFO: {info} \n
+                Answer:
+                <|eot_id|>
+                <|start_header_id|>assistant<|end_header_id|>
+                """,
+                input_variables=["user_input","cp","cs","param","scen_infos","info"],
+        )
+    
+    def execute(self) -> GraphState:
+        user_input = self.state['user_input']
+        context = self.state['context']
+        actions_history = self.state['actions_history']
+        model_info = self.state['model_info']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        consult_prompt = self.get_prompt_template()
+        sum_up_prompt = self.get_summarizing_prompt_template()
+        
+        consult_model_chain = consult_prompt | self.json_model | JsonOutputParser()
+        sum_up_info_chain = sum_up_prompt | self.chat_model | StrOutputParser()
+        
+        helper = HelperFunctions()
+
+        params, CSs = helper.get_params_and_cs_list(self.base_model)
+        CPs = helper.get_conversion_processes(self.base_model)
+        scen_infos = helper.get_scenario_params(self.base_model)
+        
+        output = consult_model_chain.invoke({"user_input": user_input,
+                                             "cp": CPs,
+                                             "cs": CSs,
+                                             "param": params,
+                                             "scen_infos": scen_infos,
+                                             "model_infos": model_info})
+
+        info = helper.consult_info(output, self.base_model)
+        
+        summed_up_info = sum_up_info_chain.invoke({"user_input": user_input,
+                                                   "cp": CPs,
+                                                   "cs": CSs,
+                                                   "param": params,
+                                                   "scen_infos": scen_infos,
+                                                   "info": info})
+        
+        if self.debug:
+            print('---CONSULT MODEL---')
+            print(f'GATHERED INFO ABOUT THE MODEL: {summed_up_info}')
+        
+        self.state['num_steps'] = num_steps
+        self.state['actions_history'] = actions_history + ['The model was consulted']
+        self.state['model_info'] = model_info + [summed_up_info]
+        self.state['context'] = context + [summed_up_info]
+        
+        return self.state
+
+# TODO fill this agent
+
+class CompareModel(AgentBase):
+    # This should be able to compare any specific variable with the base result of the
+    # model, list assets from the results, etc...
     pass
+
+# TODO make this agent work
+
+class PlotModel(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return super().get_prompt_template()
+    
+    def execute(self) -> GraphState:
+        action_history = self.state['action_history']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        if self.debug:
+            print('---PLOTTER---')
+            print(f'FINAL COMMAND: python cesm.py plot \n')
+            
+        self.state['num_steps'] = num_steps
+        self.state['action_history'] = action_history + ['The requested data was successfully plotted!']
+        
+        return self.state
+
+# TODO the outputs should also indicate if the model was runned etc...
+    
+class OutputGenerator(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at answering the user based on context given. \n
+            
+            Given the USER_INPUT and a CONTEXT, generate an answer for the query
+            asked by the user. You should make use of the provided information
+            to answer the user in the best possible way. If you think the answer
+            does not answer the user completely, ask the user for the necessary
+            information if possible. \n
+            
+            It's important never to cite that you got it from a context, the user should
+            think that you know the information. \n
+            
+            If the context cites any kind of source, indicate the same sources as a topic
+            at the end of your answer. Don't change them, for example, if you receive
+            them as URLs, use them as URLs. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            CONTEXT: {context} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["user_input","context"],
+        )
+        
+    def execute(self) -> GraphState:
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.chat_model | StrOutputParser()
+        
+        ## Get the state
+        user_input = self.state['user_input']
+        context = self.state['context']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        llm_output = llm_chain.invoke({"user_input": user_input, "context": context})
+        
+        if self.debug:
+            print("---GENERATE OUTPUT---")
+            print(f'GENERATED OUTPUT:\n{llm_output}\n')
+            
+        self.state['num_steps'] = num_steps
+        self.state['final_answer'] = llm_output
+        
+        return self.state
+    
+# Outdated
 
 class ESToolSelector(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are an expert at reading the user QUERY and routing it to the correct tool in our
+            You are an expert at reading the user QUERY and and the  routing it to the correct tool in our
             modelling system. \n
 
             Use the following criteria to decide how to route the query to one of our available tools: \n\n
@@ -170,419 +1488,6 @@ class ESToolSelector(AgentBase):
         
         return self.state
 
-class ModelSelector(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return super().get_prompt_template()
-    
-    def execute(self) -> GraphState:
-        # TODO make this work with the chat in a prettier way
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        
-        print("No valid model was found for the requested action, the available models are:\n")
-        
-        available_models = next(os.walk('Models'), (None, None, []))[2]
-        for i in range(len(available_models)):
-            print(f'{i+1}: {available_models[i]}')
-        
-        selected_model = input('Please, inform the number of the desired model:\n')
-        
-        self.state['model'] = available_models[int(selected_model)-1]
-        
-        return self.state
-    
-class Mixed(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are an expert at reading the user QUERY and the available CONTEXT to decide if there
-            is already enough information gathered to fulfill the energy system related command
-            made by the user. \n
-            
-            You must be certain that you have all the data before deciding to send it to the
-            modelling section of the pipeline. If any of the values asked by the user is not
-            directly given by him, you can't consider the data complete unless you have the
-            desired value in the CONTEXT. \n
-
-            You must output a JSON object with a single key 'complete_data' containing a boolean
-            on whether you have enough data for the user's request or not. \n
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUERY : {query} \n
-            CONTEXT: {context} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["query","context"],
-        )
-        
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        
-        query = self.state['initial_query']
-        context = self.state['context']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-
-        decision = llm_chain.invoke({"query": query, "context": context})
-        decision = decision['complete_data']
-        
-        if self.debug:
-            print("---TOOL SELECTION---")
-            print(f'QUERY: {query}')
-            print(f'CONTEXT: {context}')
-            print(f'DATA IS COMPLETE: {decision}\n')
-            
-        self.state['complete_data'] = decision
-        self.state['num_steps'] = num_steps
-        
-        return self.state
-    
-class ToolSelector(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are an expert at reading a QUERY generated by another agent in this system and routing to
-            our internal knowledge system or directly to final answer. \n
-
-            Use the following criteria to decide how to route the query to one of our available tools: \n\n
-            
-            If the user asks anything about LangSmith, you should use the 'RAG_retriever' tool.
-            
-            For any mathematical problem you should use 'calculator'. Be sure that you have all the necessary
-            data before routing to this tool.
-
-            If you are unsure or the person is asking a question you don't understand then choose 'web_search'.
-            
-            If the query seems like a question that should be asked to the user, use 'user_input'. However, this
-            should be used only in a last case scenario, since clarifications to the user should be rare. If
-            you think the question can be found online or in the documents we have, use them instead.
-
-            You do not need to be stringent with the keywords in the question related to these topics. Otherwise, use web_search.
-            Give a choice contained in ['RAG_retriever','calculator','web_search'].
-            Return the a JSON with a single key 'router_decision' and no premable or explaination.
-            Use the initial query of the user and any available context to make your decision about the tool to be used.
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUERY : {query} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["query"],
-        )
-        
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        
-        next_query = self.state['next_query']
-        query = next_query[-1]
-        query = query['next_query']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-
-        router = llm_chain.invoke({"query": query})
-        router_decision = router['router_decision']
-        
-        print("---TOOL SELECTION---")
-        print(f'QUERY: {query}')
-        print(f'SELECTED TOOL: {router_decision}\n')
-        
-        self.state['selected_tool'] = router_decision
-        self.state['num_steps'] = num_steps
-        
-        return self.state
-    
-class ResearchInfoRAG(ResearchAgentBase):
-    def get_first_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a master at working out the best questions to ask our knowledge agent to get the best info for the customer.
-
-            Given the INITIAL_QUERY, work out the best questions that will find the best \
-            info for helping to write the final answer. Write the questions to our knowledge system not to the customer.
-
-            Return a JSON with a single key 'questions' with no more than 3 strings of and no preamble or explaination.
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            INITIAL_QUERY: {initial_query} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["initial_query"],
-        )
-        
-    def get_second_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.\n
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUESTION: {question} \n
-            CONTEXT: {context} \n
-            Answer:
-            <|eot_id|>
-            <|start_header_id|>assistant<|end_header_id|>
-            """,
-            input_variables=["question","context"],
-        )
-        
-    def execute(self) -> GraphState:
-        question_rag_prompt = self.get_first_prompt_template()
-        rag_prompt = self.get_second_prompt_template()
-        answer_analyzer_prompt = self.get_answer_analyzer_prompt_template()
-        
-        question_rag_chain = question_rag_prompt | self.json_model | JsonOutputParser()
-        rag_chain = (
-            {"context": self.retriever , "question": RunnablePassthrough()}
-            | rag_prompt
-            | self.chat_model
-            | StrOutputParser()
-        )
-        answer_analyzer_chain = answer_analyzer_prompt | self.chat_model | StrOutputParser()
-        
-        if self.debug:
-            print("---RAG LANGSMITH RETRIEVER---")
-            
-        next_query = self.state['next_query']
-        query = next_query[-1]
-        initial_query = query['next_query']
-        context = self.state['context']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-
-        questions = question_rag_chain.invoke({"initial_query": initial_query})
-        questions = questions['questions']
-
-        rag_results = []
-        for idx, question in enumerate(questions):
-            temp_docs = rag_chain.invoke(question)
-            if self.debug:
-                print(f'QUESTION {idx}: {question}')
-                print(f'ANSWER FOR QUESTION {idx}: {temp_docs}')
-            question_results = question + '\n\n' + temp_docs + "\n\n\n"
-            if rag_results is not None:
-                rag_results.append(question_results)
-            else:
-                rag_results = [question_results]
-        if self.debug:
-            print(f'FULL ANSWERS: {rag_results}\n')
-        
-        processed_searches = answer_analyzer_chain.invoke({"query": initial_query, "search_results": rag_results, "context": context})
-        
-        self.state['context'] = context + [processed_searches]
-        self.state['rag_questions'] = questions
-        self.state['num_steps'] = num_steps
-        
-        return self.state
-    
-class ResearchInfoWeb(ResearchAgentBase):
-    def get_first_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a master at working out the best keywords to search for in a web search to get the best info for the user.
-
-            Given the INITIAL_QUERY, work out the best keywords that will find the info requested by the user
-            The keywords should have between 3 and 5 words each, if the query allows for it.
-
-            Return a JSON with a single key 'keywords' with no more than 3 keywords and no preamble or explaination.
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            INITIAL_QUERY: {initial_query} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["initial_query"],
-        )
-        
-    def execute(self) -> GraphState:
-        if self.debug:
-            print("---RESEARCH INFO SEARCHING---")
-            
-        next_query = self.state['next_query']
-        query = next_query[-1]
-        initial_query = query['next_query']
-        context = self.state['context']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        
-        prompt = self.get_first_prompt_template()
-        answer_analyzer_prompt = self.get_answer_analyzer_prompt_template()
-        
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        answer_analyzer_chain = answer_analyzer_prompt | self.chat_model | StrOutputParser()
-
-        # Web search
-        keywords = llm_chain.invoke({"initial_query": initial_query, "context": context})
-        keywords = keywords['keywords']
-        full_searches = []
-        for idx, keyword in enumerate(keywords):
-            temp_docs = self.web_tool.invoke({"query": keyword})
-            if type(temp_docs) == list:
-                web_results = "\n".join([d["content"] for d in temp_docs])
-                web_results = Document(page_content=web_results)
-            elif type(temp_docs) == dict:
-                web_results = temp_docs["content"]
-                web_results = Document(page_content=web_results)
-            else:
-                web_results = 'No results'
-            if self.debug:
-                print(f'KEYWORD {idx}: {keyword}')
-                print(f'RESULTS FOR KEYWORD {idx}: {web_results}')
-            if full_searches is not None:
-                full_searches.append(web_results)
-            else:
-                full_searches = [web_results]
-
-        processed_searches = answer_analyzer_chain.invoke({"query": initial_query, "search_results": full_searches, "context": context})
-        
-        if self.debug:
-            print(f'FULL RESULTS: {full_searches}\n')
-            print(f'PROCESSED RESULT: {processed_searches}')
-        
-        self.state['context'] = context + [processed_searches]
-        self.state['num_steps'] = num_steps
-        
-        return self.state
-    
-class Calculator(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a specialist at building JSON to do calculations using a calculator tool.
-            
-            You can only output a single format of JSON object consisting in two operands
-            and the operation. The name of the only three keys are 'operation', 'op_1' and 'op_2' \n
-            
-            'operation' can only be [+,-,*,/,^]
-            'op_1' and 'op_2' must be integers or float\n
-            
-            If you judge that the equation consists of more than one operation, solve only one,
-            the calculator can be called multiple times and the other results will be solved
-            later.
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            INITIAL_QUERY: {initial_query} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["initial_query"],
-        )
-        
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-    
-        next_query = self.state['next_query']
-        query = next_query[-1]
-        query = query['next_query']
-        context = self.state['context']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        
-        parameters = llm_chain.invoke({"initial_query": query})
-        operation = parameters['operation']
-        op_1 = parameters['op_1']
-        op_2 = parameters['op_2']
-
-        if operation == "+":
-            result = op_1 + op_2
-        elif operation == "-":
-            result = op_1 - op_2
-        elif operation == "/":
-            result = op_1 / op_2
-        elif operation == "*":
-            result = op_1 * op_2
-        elif operation == "^":
-            result = op_1 ** op_2
-        else:
-            result = 'ERROR'
-            
-        if result == 'ERROR':
-            str_result = 'Unable to execute the selected operation'
-        else:
-            str_result = f'{op_1} {operation} {op_2} = {result}'
-        
-        if self.debug:
-            print("---CALCULATOR TOOL---")
-            print(f'OPERATION: {operation}')
-            print(f'OPERAND 1: {op_1}')
-            print(f'OPERAND 2: {op_2}')
-            print(f'RESULT: {str_result}\n')
-            
-        self.state['context'] = context + [str_result]
-        self.state['num_steps'] = num_steps
-        
-        return self.state
-    
-class ContextAnalyzer(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a specialist at deciding if the already available information is enough to
-            fully answer the user's query. If not you must try to gather the missing info. \n
-            
-            Given a INITIAL_QUERY and the available CONTEXT, decide if the available information
-            is already enough to answer the query proposed by the user. You have also access to
-            an array NEXT_QUERY which contains all the past queries you generated, so you can avoid
-            repetitions if the information was not found previously. \n
-            
-            The pipeline you're working with has some tools that can help find information, your
-            main purpose is to decide whether or not the current information in CONTEXT can fullfil
-            the query asked by the user. \n
-            
-            Your output should be a JSON object containing two keys, 'ready_to_answer' and
-            'next_query'. 'ready_to_answer' is a boolean that indicates if all necessary info is
-            present and 'next_query' is the query you'll develop for the info gathering tool
-            to search for the missing information. \n
-            
-            Never ask anything to the user, the only kind information you should try to gather is
-            related to details of the query that don't need interaction with the user to be
-            answered, such as information that can be found in specific documents, on the internet
-            or simply by directly answering the user. \n
-            
-            NEVER ASK FOR MORE CONTEXT TO THE USER, THE ONLY INFORMATION YOU ARE ALLOWED
-            TO REQUEST IS INFORMATION MISSING FOR THE ANSWER, NOT FROM THE QUESTION. THE USER
-            MAY ASK SOME GENERIC QUERIES, JUST ANSWER THEM, DON'T ASK FOR MORE CONTEXT ON
-            DETAILS OF WHAT THE USER WANTS. IF THE QUERY IS GENERIC, GATHER ALL THE INFORMATION
-            YOU CAN WITHOUT ASKING THE USER, AND ANSWER WITH WHAT YOU CAN. \n
-            
-            In the following situations you must output 'next_query' as "<KEEP_QUERY>":
-            - User asks to modify parameters or characteristics of an energy system model;
-            - Plotting, they don't require extra information, the tools can handle it perfectly;
-            - User asks you to run a new simulation on an energy modeling system;
-            - User gives you a direct command related to modelling;
-            - The user asks anything about LangSmith (understand that as having the word LangSmith) \n
-            
-            Consider that for you boolean answer the words false and true should always be written
-            in full lower case. \n
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            INITIAL_QUERY: {initial_query} \n
-            CONTEXT: {context} \n
-            NEXT_QUERY: {next_query} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["initial_query","context","next_query"],
-        )
-        
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        
-        if self.debug:
-            print("---CONTEXT ANALYZER---")
-            
-        ## Get the state
-        initial_query = self.state['initial_query']
-        next_query = self.state['next_query']
-        context = self.state['context']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-
-        output = llm_chain.invoke({"initial_query": initial_query,
-                                   "next_query": next_query,
-                                   "context": context
-                                   })
-        
-        if output['next_query'] == '<KEEP_QUERY>':
-            output['next_query'] = self.state['initial_query']
-            
-        print(output)
-        
-        self.state['next_query'] = next_query + [output]
-        self.state['num_steps'] = num_steps
-        
-        return self.state
-    
 class ParamsIdentifier(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
@@ -746,7 +1651,7 @@ class ScenarioIdentifier(AgentBase):
         num_steps += 1
         self.state['num_steps'] = num_steps
         
-        tmap = pd.ExcelFile('Models/DEModel.xlsx')
+        tmap = pd.ExcelFile('models/DEModel.xlsx')
         df = pd.read_excel(tmap,"Scenario")
         scenarios = np.asarray(df.iloc[:,0].dropna())
         
@@ -763,6 +1668,18 @@ class ScenarioIdentifier(AgentBase):
                 identified_scenario = scenarios[selection]
             else:
                 identified_scenario = 'NOT_FOUND'
+        # if identified_scenario == 'NOT_FOUND' or not(identified_scenario in scenarios):
+        #     kwargs = {
+        #         'label': 'No valid scenario was identified in the request, here are the available scenarios:',
+        #         'buttons': scenarios,
+        #         'app': self.app,
+        #         'callback': self.confirm_selection
+        #     }
+        #     input_getter = InputGetter(self.app, **kwargs)
+        #     if not(self.selected_value in scenarios):
+        #         identified_scenario = self.selected_value
+        #     else:
+        #         identified_scenario = 'NOT_FOUND'
         
         if identified_scenario == 'NOT_FOUND':
             message = 'No valid scenario was found'
@@ -864,179 +1781,3 @@ class PlotIdentifier(AgentBase):
         self.state['final_answer'] = message
         
         return self.state
-
-# TODO rename ModifyModel
-class ModelModifier(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return super().get_prompt_template()
-    
-    def execute(self) -> GraphState:
-        if self.debug:
-            print('---MODEL MODIFIER---')
-    
-        model = self.state['model']
-        parameter = self.state['parameter']
-        cs = self.state['cs']
-        new_value = self.state['new_value']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        
-        model_file = model if '.xlsx' in model else f'{model}.xlsx'
-        workbook = load_workbook(filename=f'Models/{model_file}')
-        cs_sheet = workbook['ConversionSubProcess']
-        
-        #open workbook
-        param_idx = '0'
-        cs_idx = '0'
-        for idx, row in enumerate(cs_sheet.rows):
-            if idx == 0:
-                for i in range(len(row)):
-                    if row[i].value == parameter:
-                        param_idx = row[i].coordinate # i hate u... this is 
-            else:
-                if f'{row[0].value}@{row[1].value}@{row[2].value}@{row[3].value}' == cs:
-                    cs_idx = row[0].coordinate
-        if param_idx == '0' or cs_idx == '0':
-            final_answer = 'Selected param or cs not found.'
-            if self.debug:
-                print('Selected param or cs not found.')
-        else:
-            old_value = cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value
-            cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value = new_value
-            workbook.save(filename="Models/DEModel_modified.xlsx")
-            final_answer = f'Value successfully modified from {old_value} to {new_value}'
-            if self.debug:
-                print(f'Cell: {param_idx[0]}{cs_idx[1:]}')
-                print(final_answer)
-        
-        self.state['num_steps'] = num_steps
-        self.state['final_answer'] = final_answer
-        
-        return self.state
-    
-# TODO rename to RunModel
-class SimRunner(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return super().get_prompt_template()
-    
-    def execute(self) -> GraphState:
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        model = self.state['model']
-        scenario = self.state['scenario']
-        
-        if self.debug:
-            print('---SIMULATION RUNNER---')
-            print(f'FINAL COMMAND: python cesm.py run {model} {scenario}\n')
-            
-        self.state['num_steps'] = num_steps
-        self.state['final_answer'] = 'The requested simulation was successfully submited!'
-        
-        return self.state
-
-# TODO rename to PlotModel
-class Plotter(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return super().get_prompt_template()
-    
-    def execute(self) -> GraphState:
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        model = self.state['model']
-        scenario = self.state['scenario']
-        plot_type = self.state['plot_type']
-        variable = self.state['variable']
-        
-        if self.debug:
-            print('---PLOTTER---')
-            print(f'FINAL COMMAND: python cesm.py plot {model} {scenario} {plot_type} {variable} \n')
-            
-        self.state['num_steps'] = num_steps
-        self.state['final_answer'] = 'The requested data was successfully plotted!'
-        
-        return self.state
-    
-# TODO fill these two agents
-
-class ConsultModel(AgentBase):
-    # This should have ways of consulting variations of parameters through years,
-    # types of parameters modeled, consult values of specific parameters, etc...
-    pass
-
-class CompareModel(AgentBase): # cyyyyyYYY i hate u 
-    # This should be able to compare any specific variable with the base result of the
-    # model, list assets from the results, etc...
-    pass
-
-# TODO the outputs should also indicate if the model was runned etc...
-
-class DateGetter(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return super().get_prompt_template()
-    
-    def execute(self) -> GraphState:
-        context = self.state['context']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        
-        current_date = datetime.now().strftime("%d %B %Y, %H:%M:%S")
-        
-        result = f'The current date and time are {current_date}'
-        
-        if self.debug:
-            print("---DATE GETTER TOOL---")
-            print(f'CURRENT DATE: {current_date}\n')
-
-        self.state['context'] = context + [result]
-        self.state['num_steps'] = num_steps
-
-        return self.state
-    
-class OutputGenerator(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a specialist at answering the user based on context given. \n
-            
-            Given the INITIAL_QUERY and a CONTEXT, generate an answer for the query
-            asked by the user. You should make use of the provided information
-            to answer the user in the best possible way. If you think the answer
-            does not answer the user completely, ask the user for the necessary
-            information if possible. \n
-            
-            It's important never to cite that you got it from a context, the user should
-            think that you know the information.
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            INITIAL_QUERY: {initial_query} \n
-            CONTEXT: {context} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["initial_query","context"],
-        )
-        
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.chat_model | StrOutputParser()
-        
-        ## Get the state
-        initial_query = self.state['initial_query']
-        context = self.state['context']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-
-        answer = llm_chain.invoke({"initial_query": initial_query,
-                                                "context": context})
-        if self.debug:
-            print("---GENERATE OUTPUT---")
-            print(f'GENERATED OUTPUT:\n{answer}\n')
-            
-        self.state['num_steps'] = num_steps
-        self.state['final_answer'] = answer
-        
-        return self.state
-    
-class EmptyNode(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return super().get_prompt_template()
-    def execute(self) -> GraphState:
-        return super().execute()

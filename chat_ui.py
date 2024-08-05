@@ -1,19 +1,21 @@
 import os
 import pickle
-from abc import ABC
-from langgraph.graph import StateGraph
-from tkinter import *
 import customtkinter
+
+from abc import ABC
+from tkinter import *
+from langgraph.graph import StateGraph
 from llm_src.chat_llm import GraphBuilder
+
 # pip install customtkinter
 
 class Chat(ABC):
-    def __init__(self, app: StateGraph, recursion_limit):
+    def __init__(self, graph: StateGraph, recursion_limit):
         try:
-            self.app = app
+            self.graph = graph
             os.remove("chat_history.pkl")
         except:
-            self.app = app
+            self.graph = graph
         self.recursion_limit = recursion_limit
 
     def invoke(self, input) -> str:
@@ -25,18 +27,22 @@ class Chat(ABC):
             history = []
         history.append({"role": "user", "content": input})
 
-        inputs = {"initial_query": history, "next_query": [], "num_steps": 0, "context": [], "history": history}
-        for output in self.app.stream(inputs, {"recursion_limit": self.recursion_limit}):
+        inputs = {"initial_query": history,
+                  "next_query": [],
+                  "num_steps": 0,
+                  "context": [],
+                  "model_info": [],
+                  "actions_history": [],
+                  "history": history,
+                  "scen_ready": False}
+        for output in self.graph.stream(inputs, {"recursion_limit": self.recursion_limit}):
             for key, value in output.items():
                 print(f"Finished running <{key}> \n")
         return value['final_answer']
                 
 class App(customtkinter.CTk):
-    def __init__(self, chat, debug):
+    def __init__(self):
         super().__init__()
-        
-        self.chat = chat
-        self.debug = debug
         
         customtkinter.set_appearance_mode('dark')
         
@@ -97,9 +103,13 @@ class App(customtkinter.CTk):
         self.textbox.yview_moveto(1)
         self.textbox.configure(state="disabled")
         
+    def set_chat(self, chat):
+        self.chat = chat
+        
 if __name__ == '__main__':
-    graph = GraphBuilder(True).build()
+    app = App()
+    graph = GraphBuilder('models', app, True).build()
     chat = Chat(graph, 25)
-    app = App(chat, True)
+    app.set_chat(chat)
     app.mainloop()
     

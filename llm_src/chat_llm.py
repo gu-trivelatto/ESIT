@@ -53,214 +53,164 @@ class WebSearchTool(ABC):
         self.web_search_tool = TavilySearchResults()
     
     def execute(self, query):
-        return self.web_search_tool.invoke({"query": query})
+        return self.web_search_tool.invoke({"query": query, "max_results": 3})
     
 retriever = RAGEmbedder().retriever
-web_tool = WebSearchTool().web_search_tool
+web_tool = WebSearchTool()
 
 class GraphBuilder(ABC):
-    def __init__(self, debug):
+    def __init__(self, model_path, app, debug):
+        self.base_model = f'{model_path}/DEModel.xlsx'
+        self.mod_model = f'{model_path}/DEModel_modified.xlsx'
         self.debug = debug
+        self.app = app
+    
+    # Agents (Nodes of the Graph)
+    
+    def date_getter(self, state: GraphState) -> GraphState:
+        return agents.DateGetter(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
     def type_identifier(self, state: GraphState) -> GraphState:
-        return agents.TypeIdentifier(chat_model, json_model, state, self.debug).execute()
-
-    def es_tool_selector(self, state: GraphState) -> GraphState:
-        return agents.ESToolSelector(chat_model, json_model, state, self.debug).execute()
-
-    def model_selector(self, state: GraphState) -> GraphState:
-        return agents.ModelSelector(chat_model, json_model, state, self.debug).execute()
-
+        return agents.TypeIdentifier(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
     def mixed(self, state: GraphState) -> GraphState:
-        return agents.Mixed(chat_model, json_model, state, self.debug).execute()
-
+        return agents.Mixed(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def context_analyzer(self, state: GraphState) -> GraphState:
+        return agents.ContextAnalyzer(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
     def tool_selector(self, state: GraphState) -> GraphState:
-        return agents.ToolSelector(chat_model, json_model, state, self.debug).execute()
-
+        return agents.ToolSelector(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
     def research_info_rag(self, state: GraphState) -> GraphState:
-        return agents.ResearchInfoRAG(chat_model, json_model, retriever, web_tool, state, self.debug).execute()
+        return agents.ResearchInfoRAG(chat_model, json_model, retriever, web_tool, state, self.app, self.debug).execute()
 
     def research_info_web(self, state: GraphState) -> GraphState:
-        return agents.ResearchInfoWeb(chat_model, json_model, retriever, web_tool, state, self.debug).execute()
+        return agents.ResearchInfoWeb(chat_model, json_model, retriever, web_tool, state, self.app, self.debug).execute()
 
     def calculator(self, state: GraphState) -> GraphState:
-        return agents.Calculator(chat_model, json_model, state, self.debug).execute()
+        return agents.Calculator(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def es_actions_analyzer(self, state: GraphState) -> GraphState:
+        return agents.ESActionsAnalyzer(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
 
-    def date_getter(self, state: GraphState) -> GraphState:
-        return agents.DateGetter(chat_model, json_model, state, self.debug).execute()
-
-    def param_selector(self, state: GraphState) -> GraphState:
-        return agents.ParamsIdentifier(chat_model, json_model, state, self.debug).execute()
-
-    def scenario_selector(self, state: GraphState) -> GraphState:
-        return agents.ScenarioIdentifier(chat_model, json_model, state, self.debug).execute()
-
-    def plot_selector(self, state: GraphState) -> GraphState:
-        return agents.PlotIdentifier(chat_model, json_model, state, self.debug).execute()
-
-    def model_modifier(self, state: GraphState) -> GraphState:
-        return agents.ModelModifier(chat_model, json_model, state, self.debug).execute()
-
-    def sim_runner(self, state: GraphState) -> GraphState:
-        return agents.SimRunner(chat_model, json_model, state, self.debug).execute()
-
-    def plotter(self, state: GraphState) -> GraphState:
-        return agents.Plotter(chat_model, json_model, state, self.debug).execute()
+    def run_model(self, state: GraphState) -> GraphState:
+        return agents.RunModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def modify_model(self, state: GraphState) -> GraphState:
+        return agents.ModifyModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def consult_model(self, state: GraphState) -> GraphState:
+        return agents.ConsultModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def compare_model(self, state: GraphState) -> GraphState:
+        return agents.CompareModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def plot_model(self, state: GraphState) -> GraphState:
+        return agents.PlotModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
 
     def output_generator(self, state: GraphState) -> GraphState:
-        return agents.OutputGenerator(chat_model, json_model, state, self.debug).execute()
-
-    def context_analyzer(self, state: GraphState) -> GraphState:
-        return agents.ContextAnalyzer(chat_model, json_model, state, self.debug).execute()
-
-    def empty_node(self, state: GraphState) -> GraphState:
-        return agents.EmptyNode(chat_model, json_model, state, self.debug).execute()
+        return agents.OutputGenerator(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    # Printers (nodes of the Graph)
 
     def state_printer(self, state: GraphState) -> None:
         return printers.StatePrinter(state, self.debug).execute()
 
     def final_answer_printer(self, state: GraphState) -> None:
         return printers.FinalAnswerPrinter(state, self.debug).execute()
+    
+    # Routers (conditional edges of the Graph)
 
-    def route_to_type(self, state: GraphState) -> str:
-        return routers.RouteToType(state, self.debug).execute()
+    def type_router(self, state: GraphState) -> str:
+        return routers.TypeRouter(state, self.debug).execute()
 
-    def route_from_mix(self, state: GraphState) -> str:
-        return routers.RouteFromMix(state, self.debug).execute()
+    def mixed_router(self, state: GraphState) -> str:
+        return routers.MixedRouter(state, self.debug).execute()
 
-    def validate_selected_model(self, state: GraphState) -> str:
-        return routers.ValidateSelectedModel(state, self.debug).execute()
+    def es_tool_router(self, state: GraphState) -> str:
+        return routers.ESToolRouter(state, self.debug).execute()
 
-    def route_to_es_tool(self, state: GraphState) -> str:
-        return routers.RouteToESTool(state, self.debug).execute()
+    def context_router(self, state: GraphState) -> str:
+        return routers.ContextRouter(state, self.debug).execute()
 
-    def selection_validator(self, state: GraphState) -> str:
-        return routers.SelectionValidator(state, self.debug).execute()
-
-    def route_to_iterate(self, state: GraphState) -> str:
-        return routers.RouteToIterate(state, self.debug).execute()
-
-    def route_to_tool(self, state: GraphState) -> str:
-        return routers.RouteToTool(state, self.debug).execute()
+    def tool_router(self, state: GraphState) -> str:
+        return routers.ToolRouter(state, self.debug).execute()
+    
+    ##### Build the Graph #####
 
     def build(self) -> StateGraph:
         workflow = StateGraph(GraphState)
 
-        # Define the nodes
+        ### Define the nodes ###
+        workflow.add_node("date_getter", self.date_getter)
         workflow.add_node("type_identifier", self.type_identifier)
-        workflow.add_node("es_tool_selector", self.es_tool_selector)
-        workflow.add_node("model_selector", self.model_selector)
-        workflow.add_node("validated_model", self.empty_node)
+        workflow.add_node("es_actions_analyzer", self.es_actions_analyzer)
+        workflow.add_node("context_analyzer", self.context_analyzer)
         workflow.add_node("mixed", self.mixed)
         workflow.add_node("tool_selector", self.tool_selector)
         workflow.add_node("research_info_rag", self.research_info_rag) # RAG search
         workflow.add_node("research_info_web", self.research_info_web) # web search
-        workflow.add_node("state_printer", self.state_printer)
         workflow.add_node("calculator", self.calculator)
-        workflow.add_node("date_getter", self.date_getter)
-        workflow.add_node("inter_node", self.empty_node)
-        workflow.add_node("param_selector", self.param_selector)
-        workflow.add_node("scenario_selector", self.scenario_selector)
-        workflow.add_node("plot_selector", self.plot_selector)
-        workflow.add_node("model_modifier", self.model_modifier)
-        workflow.add_node("sim_runner", self.sim_runner)
-        workflow.add_node("plotter", self.plotter)
+        workflow.add_node("run_model", self.run_model)
+        workflow.add_node("modify_model", self.modify_model)
+        workflow.add_node("consult_model", self.consult_model)
+        workflow.add_node("compare_model", self.compare_model)
+        workflow.add_node("plot_model", self.plot_model)
         workflow.add_node("output_generator", self.output_generator)
-        workflow.add_node("context_analyzer", self.context_analyzer)
+        workflow.add_node("es_state_printer", self.state_printer)
+        workflow.add_node("context_state_printer", self.state_printer)
         workflow.add_node("final_answer_printer", self.final_answer_printer)
 
+        ### Define the graph topography ###
+        
+        # Entry and query type routing
         workflow.set_entry_point("date_getter")
         workflow.add_edge("date_getter", "type_identifier")
         workflow.add_conditional_edges(
             "type_identifier",
-            self.route_to_type,
+            self.type_router,
             {
                 "general": "context_analyzer",
-                "energy_system": "es_tool_selector",
+                "energy_system": "es_actions_analyzer",
                 "mixed": "mixed",
             }
         )
 
+        # Mixed query routing
         workflow.add_conditional_edges(
             "mixed",
-            self.route_from_mix,
+            self.mixed_router,
             {
-                "complete_data": "es_tool_selector",
+                "complete_data": "es_actions_analyzer",
                 "needs_data": "context_analyzer"
             }
         )
 
+        # Energy System branch
         workflow.add_conditional_edges(
-            "es_tool_selector",
-            self.validate_selected_model,
+            "es_actions_analyzer",
+            self.es_tool_router,
             {
-                "select_model": "model_selector",
-                "model_is_valid": "validated_model"
+                "run": "run_model",
+                "modify": "modify_model",
+                "consult": "consult_model",
+                "compare": "compare_model",
+                "plot": "plot_model",
+                "no_action": "output_generator"
             }
         )
+        workflow.add_edge("run_model", "es_state_printer")
+        workflow.add_edge("modify_model", "es_state_printer")
+        workflow.add_edge("consult_model", "es_state_printer")
+        workflow.add_edge("compare_model", "es_state_printer")
+        workflow.add_edge("plot_model", "es_state_printer")
+        workflow.add_edge("es_state_printer", "es_actions_analyzer")
 
-        workflow.add_conditional_edges(
-            "validated_model",
-            self.route_to_es_tool,
-            {
-                "data_plotter": "scenario_selector",
-                "sim_runner": "scenario_selector",
-                "model_modifier": "param_selector"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "model_selector",
-            self.route_to_es_tool,
-            {
-                "data_plotter": "scenario_selector",
-                "sim_runner": "scenario_selector",
-                "model_modifier": "param_selector"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "scenario_selector",
-            self.route_to_es_tool,
-            {
-                "data_plotter": "plot_selector",
-                "sim_runner": "inter_node"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "param_selector",
-            self.selection_validator,
-            {
-                "model_modifier": "model_modifier",
-                "end_not_valid": "output_generator"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "plot_selector",
-            self.selection_validator,
-            {
-                "data_plotter": "plotter",
-                "end_not_valid": "output_generator"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "inter_node",
-            self.selection_validator,
-            {
-                "sim_runner": "sim_runner",
-                "end_not_valid": "output_generator"
-            }
-        )
-        workflow.add_edge("model_modifier", "output_generator")
-        workflow.add_edge("plotter", "output_generator")
-        workflow.add_edge("sim_runner", "output_generator")
-
+        # General branch
         workflow.add_conditional_edges(
             "context_analyzer",
-            self.route_to_iterate,
+            self.context_router,
             {
                 "ready_to_answer": "output_generator",
                 "need_context": "tool_selector",
@@ -269,7 +219,7 @@ class GraphBuilder(ABC):
 
         workflow.add_conditional_edges(
             "tool_selector",
-            self.route_to_tool,
+            self.tool_router,
             {
                 "RAG_retriever": "research_info_rag",
                 "web_search": "research_info_web",
@@ -277,21 +227,21 @@ class GraphBuilder(ABC):
                 "user_input": "output_generator"
             },
         )
-        workflow.add_edge("research_info_rag", "state_printer")
-        workflow.add_edge("research_info_web", "state_printer")
-        workflow.add_edge("calculator", "state_printer")
+        workflow.add_edge("research_info_rag", "context_state_printer")
+        workflow.add_edge("research_info_web", "context_state_printer")
+        workflow.add_edge("calculator", "context_state_printer")
 
         workflow.add_conditional_edges(
-            "state_printer",
-            self.route_to_type,
+            "context_state_printer",
+            self.type_router,
             {
                 "general": "context_analyzer",
                 "mixed": "mixed",
             }
         )
 
+        # Final steps (generate output and print the final answer)
         workflow.add_edge("output_generator", "final_answer_printer")
         workflow.add_edge("final_answer_printer", END)
 
-        self.app = workflow.compile()
-        return self.app
+        return workflow.compile()
