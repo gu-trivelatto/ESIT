@@ -1,21 +1,23 @@
 import os
+import sys
 import pickle
 import customtkinter
+import subprocess
 
 from abc import ABC
 from tkinter import *
+from llm_src.state import GraphState
 from langgraph.graph import StateGraph
 from llm_src.chat_llm import GraphBuilder
-
-# pip install customtkinter
+from CESM import core
 
 class Chat(ABC):
     def __init__(self, graph: StateGraph, recursion_limit):
         try:
-            self.graph = graph
             os.remove("chat_history.pkl")
         except:
-            self.graph = graph
+            pass
+        self.graph = graph
         self.recursion_limit = recursion_limit
 
     def invoke(self, input) -> str:
@@ -27,14 +29,7 @@ class Chat(ABC):
             history = []
         history.append({"role": "user", "content": input})
 
-        inputs = {"initial_query": history,
-                  "next_query": [],
-                  "num_steps": 0,
-                  "context": [],
-                  "model_info": [],
-                  "actions_history": [],
-                  "history": history,
-                  "scen_ready": False}
+        inputs = GraphState.initialize(input, history)
         for output in self.graph.stream(inputs, {"recursion_limit": self.recursion_limit}):
             for key, value in output.items():
                 print(f"Finished running <{key}> \n")
@@ -107,8 +102,18 @@ class App(customtkinter.CTk):
         self.chat = chat
         
 if __name__ == '__main__':
+    # Get the directory of the current script
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Add the CESM directory to sys.path
+    cesm_dir = os.path.join(current_dir, 'CESM')
+    sys.path.append(cesm_dir)
+
+    # Add the project root to sys.path (if needed for other imports)
+    sys.path.append(current_dir)
+    
     app = App()
-    graph = GraphBuilder('models', app, True).build()
+    graph = GraphBuilder('CESM/Data/Techmap', app, True).build()
     chat = Chat(graph, 25)
     app.set_chat(chat)
     app.mainloop()

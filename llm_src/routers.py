@@ -1,9 +1,6 @@
 from abc import ABC, abstractmethod
 from llm_src.state import GraphState
 
-# TODO standardize router names
-# TODO standardize prints and variables naming
-
 class BaseRouter(ABC):
     def __init__(self, state: GraphState, debug):
         self.state = state
@@ -22,16 +19,18 @@ class TypeRouter(BaseRouter):
         Returns:
             str: Next node to call
         """
-        type = self.state['query_type']
+        type = self.state['input_type']
+        
+        message = "---TYPE ROUTER---\nROUTE TO: "
         
         if type == 'general':
-            message = "---ROUTE QUERY TO GENERAL PATH---"
+            message += "General branch\n"
             selection = "general"
         elif type == 'energy_system':
-            message = "---ROUTE QUERY TO ENERGY SYSTEM PATH---"
+            message += "Energy System branch\n"
             selection = "energy_system"
         elif type == 'mixed':
-            message = "---ROUTE QUERY TO MIXED PATH---"
+            message += "Mixed branch\n"
             selection = "mixed"
 
         if self.debug:
@@ -43,23 +42,24 @@ class MixedRouter(BaseRouter):
     def execute(self) -> str:
         data_completeness = self.state['complete_data']
 
+        message = "---MIXED ROUTER---\nROUTE TO: "
+
         if data_completeness:
-            message = "---APPLY COMMAND---"
+            message += "Run command\n"
             selection = "complete_data"
         else:
-            message = "---GATHER MORE CONTEXT---"
+            message += "Gather more context\n"
             selection = "needs_data"
             
         if self.debug:
-            print("---ROUTE TO MIX---")
             print(message)
             
         return selection
 
-class ESToolRouter(BaseRouter):
+class ESActionRouter(BaseRouter):
     def execute(self) -> str:
         """
-        Route to the necessary tool.
+        Route to the necessary action.
         Args:
             state (dict): The current graph state
         Returns:
@@ -67,23 +67,25 @@ class ESToolRouter(BaseRouter):
         """
         selection = self.state['next_action']
         
+        message = "---ENERGY SYSTEM ACTION ROUTER---\nROUTE TO: "
+        
         if selection == 'run':
-            message = "---ROUTE QUERY TO SIM RUNNER---"
+            message += "Run model\n"
             selection = "run"
         elif selection == 'modify':
-            message = "---ROUTE QUERY TO MODEL MODIFIER---"
+            message += "Modify model\n"
             selection = "modify"
         elif selection == 'consult':
-            message = "---ROUTE QUERY TO MODEL CONSULT---"
+            message += "Consult model\n"
             selection = "consult"
         elif selection == 'compare':
-            message = "---ROUTE QUERY TO MODEL COMPARE---"
+            message += "Compare results\n"
             selection = "compare"
         elif selection == 'plot':
-            message = "---ROUTE QUERY TO PLOT MODEL---"
+            message += "Plot results\n"
             selection = "plot"
         elif selection == 'no_action':
-            message = "---ROUTE QUERY TO OUTPUT---"
+            message += "Generate output\n"
             selection = "no_action"
             
         if self.debug:
@@ -102,17 +104,19 @@ class ToolRouter(BaseRouter):
         """
         selection = self.state['selected_tool']
         
+        message = "---TOOL ROUTER---\nROUTE TO: "
+        
         if selection == 'RAG_retriever':
-            message = "---ROUTE QUERY TO RAG RETRIEVER---"
+            message += "RAG Retriever\n"
             selection = "RAG_retriever"
         elif selection == 'web_search':
-            message = "---ROUTE QUERY TO WEB SEARCH---"
+            message += "Web Search\n"
             selection = "web_search"
         elif selection == 'calculator':
-            message = "---ROUTE QUERY TO CALCULATOR---"
+            message += "Calculator\n"
             selection = "calculator"
         elif selection == "user_input":
-            message = "---ROUTE TO USER INPUT---"
+            message += "User input\n"
             selection = "user_input"
             
         if self.debug:
@@ -124,21 +128,18 @@ class ToolRouter(BaseRouter):
 
 class ContextRouter(BaseRouter):
     def execute(self) -> str:
-        next_query = self.state['next_query']
-        query = next_query[-1]
-        
-        print(query)
+        query = self.state['next_query']
+
+        message = "---CONTEXT ROUTER---\nROUTE TO: "
 
         if query['ready_to_answer']:
-            message = "---GENERATE FINAL ANSWER---"
+            message += "Final answer generation\n"
             selection = "ready_to_answer"
         else:
-            message = "---GATHER MORE CONTEXT---"
+            message += "Gather more context\n"
             selection = "need_context"
             
         if self.debug:
-            print("---ROUTE TO ITERATE---")
-            print(query['next_query'])
             print(message)
             
         return selection

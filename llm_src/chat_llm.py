@@ -108,6 +108,9 @@ class GraphBuilder(ABC):
     
     def plot_model(self, state: GraphState) -> GraphState:
         return agents.PlotModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def actions_analyzer(self, state: GraphState) -> GraphState:
+        return agents.ActionsAnalyzer(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
 
     def output_generator(self, state: GraphState) -> GraphState:
         return agents.OutputGenerator(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
@@ -128,8 +131,8 @@ class GraphBuilder(ABC):
     def mixed_router(self, state: GraphState) -> str:
         return routers.MixedRouter(state, self.debug).execute()
 
-    def es_tool_router(self, state: GraphState) -> str:
-        return routers.ESToolRouter(state, self.debug).execute()
+    def es_action_router(self, state: GraphState) -> str:
+        return routers.ESActionRouter(state, self.debug).execute()
 
     def context_router(self, state: GraphState) -> str:
         return routers.ContextRouter(state, self.debug).execute()
@@ -157,6 +160,7 @@ class GraphBuilder(ABC):
         workflow.add_node("consult_model", self.consult_model)
         workflow.add_node("compare_model", self.compare_model)
         workflow.add_node("plot_model", self.plot_model)
+        workflow.add_node("actions_analyzer", self.actions_analyzer)
         workflow.add_node("output_generator", self.output_generator)
         workflow.add_node("es_state_printer", self.state_printer)
         workflow.add_node("context_state_printer", self.state_printer)
@@ -190,7 +194,7 @@ class GraphBuilder(ABC):
         # Energy System branch
         workflow.add_conditional_edges(
             "es_actions_analyzer",
-            self.es_tool_router,
+            self.es_action_router,
             {
                 "run": "run_model",
                 "modify": "modify_model",
@@ -205,7 +209,16 @@ class GraphBuilder(ABC):
         workflow.add_edge("consult_model", "es_state_printer")
         workflow.add_edge("compare_model", "es_state_printer")
         workflow.add_edge("plot_model", "es_state_printer")
-        workflow.add_edge("es_state_printer", "es_actions_analyzer")
+        workflow.add_edge("es_state_printer", "actions_analyzer")
+        
+        workflow.add_conditional_edges(
+            "actions_analyzer",
+            self.context_router,
+            {
+                "ready_to_answer": "output_generator",
+                "need_context": "es_actions_analyzer",
+            },
+        )
 
         # General branch
         workflow.add_conditional_edges(

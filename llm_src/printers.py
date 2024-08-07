@@ -18,10 +18,7 @@ class StatePrinter(PrinterBase):
         if self.debug:
             print("------------------STATE PRINTER------------------")
             print(f"Num Steps: {self.state['num_steps']} \n")
-            print(f"Initial Query: {self.state['initial_query']} \n" )
-            print(f"Next Query: {self.state['next_query']} \n" )
-            print(f"RAG Questions: {self.state['rag_questions']} \n")
-            print(f"Tool Parameters: {self.state['tool_parameters']} \n")
+            print(f"Initial Query: {self.state['user_input']} \n" )
             print(f"Context: {self.state['context']} \n" )
         return
 
