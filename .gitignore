@@ -1,3 +1,4 @@
 secrets.yml
 chat_history.pkl
 __pycache__/
+test*
