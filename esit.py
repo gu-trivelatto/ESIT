@@ -9,7 +9,6 @@ from tkinter import *
 from llm_src.state import GraphState
 from langgraph.graph import StateGraph
 from llm_src.chat_llm import GraphBuilder
-from CESM import core
 
 class Chat(ABC):
     def __init__(self, graph: StateGraph, recursion_limit):
@@ -102,16 +101,7 @@ class App(customtkinter.CTk):
         self.chat = chat
         
 if __name__ == '__main__':
-    # Get the directory of the current script
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Add the CESM directory to sys.path
-    cesm_dir = os.path.join(current_dir, 'CESM')
-    sys.path.append(cesm_dir)
-
-    # Add the project root to sys.path (if needed for other imports)
-    sys.path.append(current_dir)
-    
+    # TODO modify the way we get the path in CESM/core/input_parser.py
     app = App()
     graph = GraphBuilder('CESM/Data/Techmap', app, True).build()
     chat = Chat(graph, 25)
