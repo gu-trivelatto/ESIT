@@ -50,6 +50,7 @@ cited model.
         "langchain",
         "langchain_core",
         "langchain_groq",
+        "langchain_chroma",
         "langchain_community",
         "langchain_text_splitters",
         "openpyxl"

@@ -847,9 +847,9 @@ class RunModel(AgentBase):
             model_name = self.mod_model.split('/')[-1]
             model_name = model_name[:-5]
             scenario = 'Base'
-            techmap_dir_path = Path("../CESM").joinpath('Data', 'Techmap')
-            ts_dir_path = Path("../CESM").joinpath('Data', 'TimeSeries')
-            runs_dir_path = Path("../CESM").joinpath('Runs')
+            techmap_dir_path = Path("./CESM").joinpath('Data', 'Techmap')
+            ts_dir_path = Path("./CESM").joinpath('Data', 'TimeSeries')
+            runs_dir_path = Path("./CESM").joinpath('Runs')
             
             # Create a directory for the model if it does not exist
             db_dir_path = runs_dir_path.joinpath(model_name+'-'+scenario)
@@ -1454,6 +1454,8 @@ class ConsultModel(AgentBase):
 class CompareModel(AgentBase):
     # This should be able to compare any specific variable with the base result of the
     # model, list assets from the results, etc...
+    # TODO try to implement a way of using the init_queries.sql file to show the LLM the context
+    # of the tables for it to create a query
     pass
 
 # TODO make this agent work
@@ -1493,6 +1495,10 @@ class ActionsAnalyzer(AgentBase):
             You must output a JSON with a single key 'ready_to_answer' that may be either true
             or false, depending on your judgement on the completeness of the data regarding
             the input. ALWAYS WRITE THE BOOLEAN IN LOWERCASE, OTHERWISE THE JSON PARSE WILL FAIL. \n
+            
+            If you find messages stating that something failed during the execution of any action
+            taken by the modeling tools, you can also output 'ready_to_answer' as true. The
+            output generator will deal with telling the user that it failed. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -1546,6 +1552,9 @@ class OutputGenerator(AgentBase):
             CHAT_HISTORY can also be used to gather context and information about
             past messages exchanged between you and the user. \n
             
+            Also, you can look at the ACTION_HISTORY to understand which actions were
+            executed regarding the model. \n
+            
             If and only if the context you use to answer the user provides you a
             data source you should display the provided sources as follows:
             Source:
@@ -1564,9 +1573,10 @@ class OutputGenerator(AgentBase):
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
             CONTEXT: {context} \n
-            CHAT_HISTORY: {history}
+            ACTION_HISTORY: {action_history} \n
+            CHAT_HISTORY: {history} \n
             <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["user_input","context"],
+            input_variables=["user_input","context","action_history","history"],
         )
         
     def execute(self) -> GraphState:
@@ -1576,11 +1586,12 @@ class OutputGenerator(AgentBase):
         ## Get the state
         user_input = self.state['user_input']
         context = self.state['context']
+        action_history = self.state['action_history']
         history = self.state['history']
         num_steps = self.state['num_steps']
         num_steps += 1
 
-        llm_output = llm_chain.invoke({"user_input": user_input, "context": context, "history": history})
+        llm_output = llm_chain.invoke({"user_input": user_input, "context": context, "action_history": action_history, "history": history})
         
         if self.debug:
             print("---GENERATE OUTPUT---")
