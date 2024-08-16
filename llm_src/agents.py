@@ -12,6 +12,8 @@ from datetime import datetime
 from tabulate import tabulate
 from CESM.core.model import Model
 from CESM.core.input_parser import Parser
+from CESM.core.plotter import Plotter, PlotType
+from CESM.core.data_access import DAO
 from openpyxl import load_workbook
 from abc import ABC, abstractmethod
 from llm_src.state import GraphState
@@ -200,9 +202,10 @@ class InputGetter(ABC):
         self.destroy()
 
 class AgentBase(ABC):
-    def __init__(self, chat_model, json_model, base_model, mod_model, state: GraphState, app, debug):
+    def __init__(self, chat_model, json_model, ht_model, base_model, mod_model, state: GraphState, app, debug):
         self.chat_model = chat_model
         self.json_model = json_model
+        self.ht_model = ht_model
         self.state = state
         self.debug = debug
         self.app = app
@@ -221,11 +224,12 @@ class AgentBase(ABC):
         pass
     
 class ResearchAgentBase(ABC):
-    def __init__(self, chat_model, json_model, retriever, web_tool, state: GraphState, app, debug):
+    def __init__(self, chat_model, json_model, ht_model, retriever, web_tool, state: GraphState, app, debug):
         self.retriever = retriever
         self.web_tool = web_tool
         self.chat_model = chat_model
         self.json_model = json_model
+        self.ht_model = ht_model
         self.state = state
         self.debug = debug
         self.app = app
@@ -253,15 +257,9 @@ class ResearchAgentBase(ABC):
             <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
             input_variables=["query","search_results","context"],
         )
-    
-    def confirm_selection(self, selected_value):
-        self.selected_value = selected_value
 
     @abstractmethod
-    def get_first_prompt_template(self) -> PromptTemplate:
-        pass
-    
-    def get_second_prompt_template(self) -> PromptTemplate:
+    def get_prompt_template(self) -> PromptTemplate:
         pass
 
     def execute(self) -> GraphState:
@@ -298,12 +296,14 @@ class TypeIdentifier(AgentBase):
             "mixed" and "general". \n
 
             "energy_system": the USER_INPUT is related to modeling. Unless the user specifies that the
-            modeling he is talking about is not related to the model this tool is projected to
+            modeling he is talking about is not related to the model this tool is designed to
             analyze, you will use this branch. This branch allows you to complete diverse tasks
             related to Energy System modeling, like consulting information about the model,
             modifying values of the model, running it, comparing and plotting results, and also
             consults to the paper related to the model for more details. Anything on these lines
-            should use this branch. \n
+            should use this branch. You should also use this branch when the user talks about
+            technical parameters, parametrization in general and asks about cientific data
+            related to the development of the paper/model. \n
             
             "mixed": the USER_INPUT would be identified as "energy_system", but there are references in
             the input that must be researched online to be able to gather the necessary context for the
@@ -317,6 +317,8 @@ class TypeIdentifier(AgentBase):
             
             You may also use the CHAT_HISTORY to get a better context of past messages exchanged
             between you and the user, and better understand what he wants in the current message. \n
+            
+            Always use double quotes in the JSON object. \n
             
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT : {user_input} \n
@@ -347,6 +349,56 @@ class TypeIdentifier(AgentBase):
         self.state['num_steps'] = num_steps
         
         return self.state
+    
+class InputConsolidator(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are an expert at verifying if the USER_INPUT is complete on it's own or if it
+            references data from the CHAT_HISTORY. \n
+            
+            You should output a JSON object with a single key 'consolidated_input', in which
+            you have two possible situations.
+            1. The USER_INPUT don't reference past messages and the following tools can use
+            it as it is to execute their actions;
+            2. The USER_INPUT references messages from CHAT_HISTORY, and this information is
+            needed for the following tools. \n
+            
+            Your actions based on the situations are:
+            1. Simply repeat the USER_INPUT as the 'consolidated_input';
+            2. Build a new 'consolidated_input' adding the necessary information from the
+            CHAT_HISTORY, while still keeping it as similar as possible with USER_INPUT. \n
+            
+            Always use double quotes in the JSON object. \n
+            
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT : {user_input} \n
+            CHAT_HISTORY: {history} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["user_input", "history"],
+        )
+        
+    def execute(self) -> GraphState:
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+        
+        user_input = self.state['user_input']
+        history = self.state['history']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        llm_output = llm_chain.invoke({"user_input": user_input, "history": history})
+        consolidated_input = llm_output['consolidated_input']
+        
+        if self.debug:
+            print("---INPUT CONSOLIDATOR---")
+            print(f'USER INPUT: {user_input.rstrip()}')
+            print(f'CONSOLIDATED INPUT: {consolidated_input}\n')
+            
+        self.state['consolidated_input'] = consolidated_input
+        self.state['num_steps'] = num_steps
+        
+        return self.state
 
 class ESActionsAnalyzer(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
@@ -358,9 +410,9 @@ class ESActionsAnalyzer(AgentBase):
             the user's request. \n
             
             You have a total of 6 actions that can be taken. You can modify the model, run the model,
-            consult information from the model, compare the results of the model, plot the results
-            of the model and no action in case there is nothing more to be done and the output can
-            be generated to the user. \n
+            consult data about the model and the theory behind it, compare the results
+            of the model, plot the results of the model and no action in case there is nothing more
+            to be done and the output can be generated to the user. \n
             
             The user will provide you with a USER_INPUT and you should define the line of action to take.
             CONTEXT and ACTION_HISTORY is also there for you to know what you already did in past iterations. \n
@@ -375,6 +427,8 @@ class ESActionsAnalyzer(AgentBase):
             You may also check for the CHAT_HISTORY to verify what already happened in this session
             of the chat with the user. \n
             
+            Always use double quotes in the JSON object. \n
+            
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT : {user_input} \n
             ACTION_HISTORY: {action_history} \n
@@ -388,7 +442,7 @@ class ESActionsAnalyzer(AgentBase):
         prompt = self.get_prompt_template()
         llm_chain = prompt | self.json_model | JsonOutputParser()
         
-        user_input = self.state['user_input']
+        user_input = self.state['consolidated_input']
         action_history = self.state['action_history']
         context = self.state['context']
         history = self.state['history']
@@ -408,53 +462,40 @@ class ESActionsAnalyzer(AgentBase):
         
         return self.state
 
-class ContextAnalyzer(AgentBase):
+class QueryGenerator(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a specialist at deciding if the already available information is enough to
-            fully answer the user's query. If not you must try to gather the missing info. \n
+            You are a specialist at developing a query to retrieve information from other means
+            given the USER_INPUT and the CONTEXT with already known information. \n
             
-            Given a USER_INPUT and the available CONTEXT, decide if the available information
-            is already enough to answer the query proposed by the user. You have also access to
-            an array QUERY_HISTORY which contains all the past queries you generated, so you can avoid
-            repetitions if the information was not found previously. \n
+            Using the CONTEXT to check which information is already available, you should analyze the
+            USER_INPUT and decide what will be the next query for the available tools. You have 
+            three options to gather information, online search, calculator and the aditional
+            user's inputs. The identifiers of these options are ['web_search', 'calculator', 'user_input']. \n
             
-            You may also check for the CHAT_HISTORY to verify what already happened in this session
-            of the chat with the user. \n
+            You'll also receive QUERY_HISTORY, use it to avoid repeating questions. If similar information was
+            already searched at least 3 times without success, you may request for the user to input more
+            information about what he wants. You may also check for the CHAT_HISTORY to verify what already
+            happened in this session of the chat with the user, some information may be already present there. \n
             
-            The pipeline you're working with has some tools that can help find information, your
-            main purpose is to decide whether or not the current information in CONTEXT can fullfil
-            the query asked by the user. \n
+            Restrain yourself as much as possible to request the user for more data, the only two cases you
+            may do this are:
+            1. The user asked for you to use information that only he knows (personal information for example);
+            2. You already tried searching the information at least 3 times but couldn't find it, then you may
+            prompt the user if the information could be provide more context for further research. If you couldn't
+            find even having the necessary context, simply select 'no_action' as the selected tool. \n
             
-            Your output should be a JSON object containing two keys, 'ready_to_answer' and
-            'next_query'. 'ready_to_answer' is a boolean that indicates if all necessary info is
-            present and 'next_query' is the query you'll develop for the info gathering tool
-            to search for the missing information. \n
+            Also, never consider that you know how to to calculations, if there is any calculation in the 
+            user request, build a query with it and pass it forward. For any mathematical problem you should use
+            'calculator'. Be sure that you have all the necessary data before routing to this tool. Also, it
+            only solves the following calculations [+,-,*,/,^], it doesn't do anything else. \n
             
-            Never ask anything to the user, the only kind information you should try to gather is
-            related to details of the query that don't need interaction with the user to be
-            answered, such as information that can be found in specific documents, on the internet
-            or simply by directly answering the user. \n
+            You must output a JSON object with two keys, 'tool' and 'next_query'. 'tool' may contain one of the
+            following ['web_search', 'calculator', 'user_input', 'no_action'] while 'next_query' is the next
+            query to be processed by the tools. \n
             
-            NEVER ASK FOR MORE CONTEXT TO THE USER, THE ONLY INFORMATION YOU ARE ALLOWED
-            TO REQUEST IS INFORMATION MISSING FOR THE ANSWER, NOT FROM THE QUESTION. THE USER
-            MAY ASK SOME GENERIC QUERIES, JUST ANSWER THEM, DON'T ASK FOR MORE CONTEXT ON
-            DETAILS OF WHAT THE USER WANTS. IF THE QUERY IS GENERIC, GATHER ALL THE INFORMATION
-            YOU CAN WITHOUT ASKING THE USER, AND ANSWER WITH WHAT YOU CAN. \n
-            
-            Also, never consider that you know how to to calculations, if there is any
-            calculation in the user request, build a query with it and pass it forward. \n
-            
-            In the following situations you must output 'next_query' as "<KEEP_QUERY>":
-            - User asks to modify parameters or characteristics of an energy system model;
-            - Plotting, they don't require extra information, the tools can handle it perfectly;
-            - User asks you to run a new simulation on an energy modeling system;
-            - User gives you a direct command related to modelling;
-            - The user asks anything about LangSmith (understand that as having the word LangSmith) \n
-            
-            Consider that for you boolean answer the words false and true should always be written
-            in full lower case. \n
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -482,9 +523,6 @@ class ContextAnalyzer(AgentBase):
                                    "query_history": query_history,
                                    "history": history
                                    })
-        
-        if llm_output['next_query'] == '<KEEP_QUERY>':
-            llm_output['next_query'] = self.state['user_input']
         
         if self.debug:
             print("---CONTEXT ANALYZER---")
@@ -515,6 +553,9 @@ class Mixed(AgentBase):
 
             You must output a JSON object with a single key 'is_data_complete' containing a boolean
             on whether you have enough data for the user's request or not. \n
+            
+            Always use double quotes in the JSON object. \n
+            
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT : {user_input} \n
             CONTEXT: {context} \n
@@ -547,152 +588,58 @@ class Mixed(AgentBase):
         
         return self.state
 
-# TODO update this selector, the query is kinda strange now
-
-class ToolSelector(AgentBase):
+class ContextAnalyzer(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are an expert at reading a QUERY generated by another agent in this system and routing to
-            our internal knowledge system or directly to final answer. \n
+            You are an expert at analyzing the available CONTEXT and CHAT_HISTORY to decide if the available
+            information is already enough to answer the question asked in USER_INPUT. \n
 
-            Use the following criteria to decide how to route the query to one of our available tools: \n\n
+            It's important to know that you are the context analyzer for a branch of a tool, and this branch is
+            responsible to gather general information to be used in the modeling context. If the USER_INPUT
+            is related to modeling and uses information available at the data sources to apply modeling actions
+            and all this information is available, then you should consider that the context is ready. Other
+            tools will be responsible of using this data for modeling. \n
             
-            If the user asks anything about LangSmith, you should use the 'RAG_retriever' tool.
+            If there is nothing related to modeling you can simply define it as ready when all information is
+            gathered. \n
             
-            For any mathematical problem you should use 'calculator'. Be sure that you have all the necessary
-            data before routing to this tool. Also, it only solves the following calculations [+,-,*,/,^], it
-            doesn't do anything else.
-
-            If you are unsure or the person is asking a question you don't understand then choose 'web_search'.
+            Your output is a JSON object with a single key 'ready_to_answer', where you can use either true
+            or false (always write it in lowercase). \n
             
-            If the query seems like a question that should be asked to the user, use 'user_input'. However, this
-            should be used only in a last case scenario, since clarifications to the user should be rare. If
-            you think the question can be found online or in the documents we have, use them instead.
-
-            You do not need to be stringent with the keywords in the question related to these topics. Otherwise, use web_search.
-            Give a choice contained in ['RAG_retriever','calculator','web_search'].
-            Return the a JSON with a single key 'router_decision' and no premable or explaination.
-            Use the initial query of the user and any available context to make your decision about the tool to be used.
+            Always use double quotes in the JSON object. \n
+            
             <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUERY : {query} \n
+            USER_INPUT: {user_input} \n
+            CONTEXT : {context} \n
+            CHAT_HISTORY: {history} \n
             <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["query"],
+            input_variables=["user_input","context","history"]
         )
         
     def execute(self) -> GraphState:
         prompt = self.get_prompt_template()
         llm_chain = prompt | self.json_model | JsonOutputParser()
         
-        query = self.state['next_query']['next_query']
+        user_input = self.state['consolidated_input']
+        context = self.state['context']
+        history = self.state['history']
         num_steps = self.state['num_steps']
         num_steps += 1
 
-        llm_output = llm_chain.invoke({"query": query})
-        router_decision = llm_output['router_decision']
+        llm_output = llm_chain.invoke({"user_input": user_input, "context": context, "history": history})
         
         if self.debug:
             print("---TOOL SELECTION---")
-            print(f'QUERY: {query}')
-            print(f'SELECTED TOOL: {router_decision}\n')
+            print(f'READY TO ANSWER: {llm_output["ready_to_answer"]}\n')
         
-        self.state['selected_tool'] = router_decision
-        self.state['num_steps'] = num_steps
-        
-        return self.state
-    
-# TODO rename prompt functions
-# TODO rewrite this and re-purpose as the paper RAG, move to the other branch
-# TODO check the answer analyzer prompt
-
-class ResearchInfoRAG(ResearchAgentBase):
-    def get_first_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a master at working out the best questions to ask our knowledge agent to get 
-            the best info for the customer. \n
-
-            Given the QUERY, work out the best questions that will find the best info for 
-            helping to write the final answer. Write the questions to our knowledge system not 
-            to the customer. \n
-
-            Return a JSON with a single key 'questions' with no more than 3 strings of and no 
-            preamble or explaination. \n
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUERY: {query} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["query"],
-        )
-        
-    def get_second_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are an assistant for question-answering tasks. Use the following pieces of 
-            retrieved context to answer the question. If you don't know the answer, just say 
-            that you don't know. Use three sentences maximum and keep the answer concise. \n
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUESTION: {question} \n
-            CONTEXT: {context} \n
-            Answer:
-            <|eot_id|>
-            <|start_header_id|>assistant<|end_header_id|>
-            """,
-            input_variables=["question","context"],
-        )
-        
-    def execute(self) -> GraphState:
-        question_rag_prompt = self.get_first_prompt_template()
-        rag_prompt = self.get_second_prompt_template()
-        answer_analyzer_prompt = self.get_answer_analyzer_prompt_template()
-        
-        question_rag_chain = question_rag_prompt | self.json_model | JsonOutputParser()
-        rag_chain = (
-            {"context": self.retriever, "question": RunnablePassthrough()}
-            | rag_prompt
-            | self.chat_model
-            | StrOutputParser()
-        )
-        answer_analyzer_chain = answer_analyzer_prompt | self.chat_model | StrOutputParser()
-        
-        if self.debug:
-            print("---RAG LANGSMITH RETRIEVER---")
-            
-        query = self.state['next_query']['next_query']
-        context = self.state['context']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-
-        questions = question_rag_chain.invoke({"query": query})
-        questions = questions['questions']
-
-        rag_results = []
-        for idx, question in enumerate(questions):
-            temp_docs = rag_chain.invoke(question)
-            if self.debug:
-                print(f'QUESTION {idx}: {question}')
-                print(f'ANSWER FOR QUESTION {idx}: {temp_docs}')
-            question_results = question + '\n\n' + temp_docs + "\n\n\n"
-            if rag_results is not None:
-                rag_results.append(question_results)
-            else:
-                rag_results = [question_results]
-        if self.debug:
-            print(f'FULL ANSWERS: {rag_results}\n')
-        
-        processed_searches = answer_analyzer_chain.invoke({"query": query, "search_results": rag_results, "context": context})
-        result = f'Source: Langsmith Doc \n{query}: \n{processed_searches}'
-        
-        # TODO keeping the questions is not necessary
-        
-        self.state['context'] = context + [result]
+        self.state['next_query'] = llm_output
         self.state['num_steps'] = num_steps
         
         return self.state
 
 class ResearchInfoWeb(ResearchAgentBase):
-    def get_first_prompt_template(self) -> PromptTemplate:
+    def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
             You are a master at working out the best keywords to search for in a web search to get the best info for the user.
@@ -701,6 +648,8 @@ class ResearchInfoWeb(ResearchAgentBase):
             The queries must contain no more than a phrase, since it will be used for online search. 
 
             Return a JSON with a single key 'keywords' with at most 3 different search queries.
+            
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             QUERY: {query} \n
@@ -717,7 +666,7 @@ class ResearchInfoWeb(ResearchAgentBase):
         num_steps = self.state['num_steps']
         num_steps += 1
         
-        prompt = self.get_first_prompt_template()
+        prompt = self.get_prompt_template()
         answer_analyzer_prompt = self.get_answer_analyzer_prompt_template()
         
         llm_chain = prompt | self.json_model | JsonOutputParser()
@@ -756,7 +705,9 @@ class ResearchInfoWeb(ResearchAgentBase):
         self.state['num_steps'] = num_steps
         
         return self.state
-    
+
+# TODO switch the calculator to use eval()
+   
 class Calculator(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
@@ -776,6 +727,8 @@ class Calculator(AgentBase):
             it to complete your selected operation. If not, simply choose the first operation in the
             correct order to be executed. The result will be saved and used for the next operation
             in another iteration. \n
+            
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             QUERY: {query} \n
@@ -921,6 +874,8 @@ class ModifyModel(AgentBase):
             
             Remember that for the sheet to be 'scenario' you need to receive explicitly the defined terms from
             the USER_INPUT. \n
+            
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -949,6 +904,8 @@ class ModifyModel(AgentBase):
             add the next year to the yearly list as a starting point for the modification, and keep the remaining
             years, just changing their values. Also, for this list the only possibility are numbers for the 
             values, not 'infinity' or anything like that. \n
+            
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -977,6 +934,8 @@ class ModifyModel(AgentBase):
             
             Your output must be a JSON object with a single key called 'parametrization_type', where your options are
             'defined' for the first case and 'undefined' for the second. These are your only possibilities. \n
+            
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -1039,6 +998,8 @@ class ModifyModel(AgentBase):
             For the 'mod_type' you can use two different types, 'fixed' or 'multiplier'. 'fixed' tells the tool
             that you want the value to be exactly what you specified, 'multiplier' indicates that you want the
             current value to be multiplied by the value you defined. \n
+            
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -1090,6 +1051,8 @@ class ModifyModel(AgentBase):
             For the 'mod_type' you can use two different types, 'fixed' or 'multiplier'. 'fixed' tells the tool
             that you want the value to be exactly what you specified, 'multiplier' indicates that you want the
             current value to be multiplied by the value you defined. \n
+            
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -1119,7 +1082,7 @@ class ModifyModel(AgentBase):
         params_defined_chain = params_defined_prompt | self.json_model | JsonOutputParser()
         params_undefined_chain = params_undefined_prompt | self.json_model | JsonOutputParser()
     
-        user_input = self.state['user_input']
+        user_input = self.state['consolidated_input']
         context = self.state['context']
         action_history = self.state['action_history']
         scen_modded = self.state['scen_modded']
@@ -1293,6 +1256,122 @@ class ModifyModel(AgentBase):
         self.state['actions_history'] = action_history + result
         
         return self.state
+
+class InfoTypeIdentifier(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are part of a modelling insights system, in this system we have two sources of
+            information, the paper that explains the model that we use and the model data itself.
+            You are an expert at defining from which of these two the information asked by the
+            user should be gathered. \n
+            
+            You have access to the USER_INPUT, and based on that you should decide if the output
+            is 'model' or 'paper'. \n
+            
+            Normally, the output will be 'model' if the user asks for the value of a specific
+            parameter, or if the user asks about components that are modeled (such as commodity,
+            conversion processes, conversion subprocesses and scenario information) in a general
+            way (not asking for detailed modelling information). \n
+            
+            On other cases you should use 'paper', that's where the theoric information behind
+            the model lies, information such as intrinsec details of the modeling process,
+            constraints, parameter relationships, details of the types of parameters and 
+            implementation details. \n
+
+            Return a JSON with a single key 'type' that contains either 'model' or 'paper'. \n
+            
+            Always use double quotes in the JSON object. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["user_input"],
+        )
+    
+    def execute(self) -> GraphState:
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+        
+        user_input = self.state['consolidated_input']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        llm_output = llm_chain.invoke({"user_input": user_input})
+        
+        if self.debug:
+            print("---INFO TYPE IDENTIFIER---")
+            print(f'RETRIEVAL TYPE: {llm_output["type"]}\n')
+        
+        self.state['retrieval_type'] = llm_output['type']
+        self.state['num_steps'] = num_steps
+        
+        return self.state
+
+# TODO check the answer analyzer prompt
+
+class ResearchInfoRAG(ResearchAgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a master at working out the best questions to ask our knowledge agent to get 
+            the best info for the customer. \n
+
+            Given the QUERY, work out the best questions that will find the best info for 
+            helping to write the final answer. Write the questions to our knowledge system not 
+            to the customer. \n
+
+            Return a JSON with a single key 'questions' with no more than 3 strings of and no 
+            preamble or explaination. \n
+            
+            Always use double quotes in the JSON object. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            QUERY: {query} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["query"],
+        )
+        
+    def execute(self) -> GraphState:
+        question_rag_prompt = self.get_prompt_template()
+        answer_analyzer_prompt = self.get_answer_analyzer_prompt_template()
+        
+        question_rag_chain = question_rag_prompt | self.json_model | JsonOutputParser()
+        answer_analyzer_chain = answer_analyzer_prompt | self.chat_model | StrOutputParser()
+        
+        if self.debug:
+            print("---RAG PDF PAPER RETRIEVER---")
+            
+        query = self.state['consolidated_input']
+        context = self.state['context']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        questions = question_rag_chain.invoke({"query": query})
+        questions = questions['questions']
+
+        rag_results = []
+        for idx, question in enumerate(questions):
+            temp_docs = self.retriever.execute(question)
+            if self.debug:
+                print(f'QUESTION {idx}: {question}')
+                print(f'ANSWER FOR QUESTION {idx}: {temp_docs.response}')
+            question_results = question + '\n\n' + temp_docs.response + "\n\n\n"
+            if rag_results is not None:
+                rag_results.append(question_results)
+            else:
+                rag_results = [question_results]
+        if self.debug:
+            print(f'FULL ANSWERS: {rag_results}\n')
+        
+        processed_searches = answer_analyzer_chain.invoke({"query": query, "search_results": rag_results, "context": context})
+        # TODO find a way of referencing the used pdfs
+        result = f'Source: PDF paper \n{query}: \n{processed_searches}'
+        
+        self.state['context'] = context + [result]
+        self.state['num_steps'] = num_steps
+        
+        return self.state
     
 # TODO re-think the way the info flows from and to here
 
@@ -1341,6 +1420,8 @@ class ConsultModel(AgentBase):
             to you in the input lists, you are also NOT ALLOWED to guess CSs or params, use only the ones
             available in the lists. The values in 'cs' and 'param' should always be lists, even if you want
             to know a single value. \n
+            
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -1400,7 +1481,7 @@ class ConsultModel(AgentBase):
         )
     
     def execute(self) -> GraphState:
-        user_input = self.state['user_input']
+        user_input = self.state['consolidated_input']
         context = self.state['context']
         action_history = self.state['action_history']
         model_info = self.state['model_info']
@@ -1449,32 +1530,244 @@ class ConsultModel(AgentBase):
         
         return self.state
 
-# TODO fill this agent
-
 class CompareModel(AgentBase):
-    # This should be able to compare any specific variable with the base result of the
-    # model, list assets from the results, etc...
-    # TODO try to implement a way of using the init_queries.sql file to show the LLM the context
-    # of the tables for it to create a query
-    pass
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+                You are an specialist at analyzing the variations in the model's output variables to summarize
+                the most relevant information given the USER_INPUT and the OUTPUT_VARIATIONS. \n
+                
+                OUTPUT_VARIATIONS is a dictionary that contains the percentual variation of the output variables
+                of a model after the user modified it and ran it again. The first layer is has the output variables
+                as the key, the second has each year of the simulation as a key, and finally, the values of these
+                are the the variations for each subprocess (represented by a combination of 
+                'conversion_process'@'commodity_in'@'commodity_out'). \n
+                
+                You also have access to the capital cost (CAPEX), operational cost (OPEX) and the total cost
+                (TOTEX = CAPEX + OPEX) of the model in COSTS_VARIATION. \n
+                
+                You must consider that the model was modified to account for the user's modification request shown
+                in USER_INPUT, then the modified model was simulated and the variation you have available in
+                OUTPUT_VARIATIONS is the variation between the original model and the model with the modifications
+                requested by the user. Using this context you should be able to give the user the main insights
+                about the scenario that he requested. \n
 
-# TODO make this agent work
+                <|eot_id|><|start_header_id|>user<|end_header_id|>
+                USER_INPUT: {user_input} \n
+                OUTPUT_VARIATIONS: {output_variations} \n
+                COSTS_VARIATION: {costs_variation} \n
+                Answer:
+                <|eot_id|>
+                <|start_header_id|>assistant<|end_header_id|>
+                """,
+                input_variables=["user_input","output_variations","costs_variation"],
+            )
+    
+    def execute(self) -> GraphState:
+        user_input = self.state['consolidated_input']
+        context = self.state['context']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+
+        runs_dir_path = './CESM/Runs'
+        simulation_base = 'DEModel-Base'
+        simulation_new = 'DEModelMock-Base'
+        fname_model = 'db.sqlite'
+
+        db_path_base = os.path.join(runs_dir_path, simulation_base, fname_model)
+        db_path_new = os.path.join(runs_dir_path, simulation_new, fname_model)
+        conn_base = sqlite3.connect(db_path_base)
+        conn_new = sqlite3.connect(db_path_new)
+        dao_base = DAO(conn_base)
+        dao_new = DAO(conn_new)
+
+        non_t_variables = ["Cap_new",
+                        "Cap_active",
+                        "Cap_res",
+                        "Eouttot",
+                        "Eintot",
+                        "E_storage_level_max"]
+
+        single_values = ["OPEX",
+                        "CAPEX",
+                        "TOTEX"]
+
+        for idx, variable in enumerate(non_t_variables):
+            df_value_base = dao_base.get_as_dataframe(variable)
+            df_value_new = dao_new.get_as_dataframe(variable)
+            if idx == 0:
+                df_base = df_value_base.rename(columns={'value': variable})
+                df_new = df_value_new.rename(columns={'value': variable})
+            else:
+                df_base[variable] = df_value_base['value']
+                df_new[variable] = df_value_new['value']
+
+        for idx, variable in enumerate(single_values):
+            df_value_base = dao_base.get_as_dataframe(variable)
+            df_value_new = dao_new.get_as_dataframe(variable)
+            if idx == 0:
+                df_single_base = df_value_base.rename(columns={'value': variable})
+                df_single_new = df_value_new.rename(columns={'value': variable})
+            else:
+                df_single_base[variable] = df_value_base['value']
+                df_single_new[variable] = df_value_new['value']
+                
+        variations_single = (df_single_new / df_single_base - 1) * 100
+        
+        variations = ((df_new.iloc[:,4:] / df_base.iloc[:,4:] - 1) * 100).replace([np.inf, np.nan], 0).apply(np.int64)
+        df_variations = df_new.copy()
+        df_variations[non_t_variables] = variations[non_t_variables]
+        df_variations['cs'] = df_variations[['cp','cin','cout']].agg('@'.join, axis=1)
+        
+        years = np.unique(df_variations['Year'])
+        
+        variations_dict = {var: {year: [] for year in years} for var in non_t_variables}
+
+        for variable in non_t_variables:
+            for year in years:
+                for _, row in df_variations.loc[(df_variations['Year']==year) & (df_variations[variable]!=0)].iterrows():
+                    if row['cs'] == 'DEBUG@Dummy@DEBUG':
+                        continue
+                    entry = f'{row["cs"]} = {min(row[variable], 500)}'
+                    variations_dict[variable][year].append(entry)
+        
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.ht_model | StrOutputParser()
+
+        llm_output = llm_chain.invoke({"user_input": user_input, "output_variations": variations_dict, "costs_variation": variations_single})
+        
+        if self.debug:
+            print("---COMPARE RESULTS---")
+            print(f'ANALYSIS: {llm_output}\n')
+        
+        self.state['context'] = context + [llm_output]
+        self.state['num_steps'] = num_steps
+        
+        return self.state
 
 class PlotModel(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
-        return super().get_prompt_template()
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are an specialist at deciding the correct type of plot to show to the user
+            based on simulation results that we have access. \n
+            
+            Based on the USER_INPUT you should either identify the plot requested by the user
+            directly, or try to guess the correct ones if the USER_INPUT is a bit more generic
+            and don't specify any plot. \n
+            
+            To help you, you have access to a list called AVAILABLE_PLOTS where you have all
+            plotting possibilities. Each of the sublists is a type of plot that you can request,
+            some of them have elements show as REQUIRED, that means that they need extra information
+            to the plot to work. The format of the sublists is ['plot_type', 'plot_subtype', 'commodity', 'year']
+            and you can find the possibilities for commodity and year in COMMODITIES AND YEARS. 
+            They MUST be filled in the plots that have them as REQUIRED. If it's not required you
+            can keep the values empty. \n
+            
+            You must output a JSON object containing a single key 'plots'. The value of this key
+            will be a list of lists, where each sublist consists of a plot selection. The format of
+            the sublists is ['plot_type', 'plot_subtype', 'commodity', 'year'], it must stay in this
+            exact order. \n
+            
+            All commodities and years that you select MUST be in COMMODITIES and YEARS, you are not
+            allowed to guess any of them, since the tool cannot plot data for inexistent commodities
+            or years. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            AVAILABLE_PLOTS: {available_plots} \n
+            COMMODITIES: {commodities} \n
+            YEARS: {years} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input","available_plots","commodities","years"],
+        )
     
     def execute(self) -> GraphState:
+        user_input = self.state['consolidated_input']
         action_history = self.state['action_history']
+        context = self.state['context']
         num_steps = self.state['num_steps']
         num_steps += 1
         
         if self.debug:
-            print('---PLOTTER---')
-            print(f'FINAL COMMAND: python cesm.py plot \n')
+            print('---PLOT RESULTS---')
+        
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+        
+        runs_dir_path = 'CESM/Runs'
+        simulation = f'{self.base_model.split("/")[-1][:-5]}-Base'
+
+        db_path = os.path.join(runs_dir_path, simulation, 'db.sqlite')
+        print(db_path)
+        conn = sqlite3.connect(db_path)
+        dao = DAO(conn)
+        plotter = Plotter(dao)
+
+        available_plots = [['Bar', 'ENERGY_CONSUMPTION', 'REQUIRED', ''],
+                           ['Bar', 'ENERGY_PRODUCTION', 'REQUIRED', ''],
+                           ['Bar', 'ACTIVE_CAPACITY', 'REQUIRED', ''],
+                           ['Bar', 'NEW_CAPACITY', 'REQUIRED', ''],
+                           ['Bar', 'CO2_EMISSION', '', ''],
+                           ['Bar', 'PRIMARY_ENERGY', '', ''],
+                           ['TimeSeries', 'ENERGY_CONSUMPTION', 'REQUIRED', 'REQUIRED'],
+                           ['TimeSeries','ENERGY_PRODUCTION', 'REQUIRED', 'REQUIRED'],
+                           ['TimeSeries','POWER_CONSUMPTION', 'REQUIRED', 'REQUIRED'],
+                           ['TimeSeries','POWER_PRODUCTION', 'REQUIRED', 'REQUIRED'],
+                           ['Sankey', 'SANKEY', '', 'REQUIRED'],
+                           ['SingleValue', 'CAPEX', '', ''],
+                           ['SingleValue', 'OPEX', '', ''],
+                           ['SingleValue', 'TOTEX', '', '']]
+            
+        commodities = [str(c) for c in dao.get_set("commodity")]
+        commodities.remove('Dummy')
+
+        years = [int(y) for y in dao.get_set("year")]
+
+        output = llm_chain.invoke({"user_input": user_input,
+                                   "available_plots": available_plots,
+                                   "commodities": commodities,
+                                   "years": years})
+
+        selected_plots = output['plots']
+
+        for plot in selected_plots:
+            plot_type = plot[0]
+            plot_subtype = plot[1]
+            commodity = plot[2]
+            year = plot[3]
+            
+            p_type = getattr(PlotType, plot_type)
+            
+            if plot_type == 'Bar':
+                # Combination
+                if plot_subtype in  ['PRIMARY_ENERGY', 'CO2_EMISSION']:
+                    plotter.plot_bars(getattr(p_type, plot_subtype))
+                else:
+                    plotter.plot_bars(getattr(p_type, plot_subtype), commodity=commodity)
+
+            elif plot_type == 'TimeSeries':
+                plotter.plot_timeseries(getattr(p_type, plot_subtype), year=year, commodity=commodity)
+            
+            elif plot_type == 'Sankey':
+                f = plotter.plot_sankey(year)
+                f.show()
+
+            elif plot_type == 'SingleValue':
+                plotter.plot_single_value([getattr(p_type, plot_subtype)])
+                
+        message = """
+        The requested data was successfully plotted and shown to the user, there is no need to try to manipulate any
+        data to generate a visual plot to the user. Simply tell him that it was plotted and the data is now available
+        for him to check.
+        """
             
         self.state['num_steps'] = num_steps
         self.state['action_history'] = action_history + ['The requested data was successfully plotted!']
+        self.state['context'] = context + [message]
         
         return self.state
 
@@ -1492,6 +1785,9 @@ class ActionsAnalyzer(AgentBase):
             the model that may be needed to answer the user, and ACTION_HISTORY shows you what
             was already done to reach the goal of fulfilling the user's request. \n
             
+            You can also always check the CHAT_HISTORY to check if the input provided by the
+            user references another past message. \n
+            
             You must output a JSON with a single key 'ready_to_answer' that may be either true
             or false, depending on your judgement on the completeness of the data regarding
             the input. ALWAYS WRITE THE BOOLEAN IN LOWERCASE, OTHERWISE THE JSON PARSE WILL FAIL. \n
@@ -1499,14 +1795,17 @@ class ActionsAnalyzer(AgentBase):
             If you find messages stating that something failed during the execution of any action
             taken by the modeling tools, you can also output 'ready_to_answer' as true. The
             output generator will deal with telling the user that it failed. \n
+            
+            Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
             CONTEXT: {context} \n
             MODEL_INFO: {model_info} \n
             ACTION_HISTORY: {action_history} \n
+            CHAT_HISTORY: {history} \n
             <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["user_input","context","model_info","action_history"],
+            input_variables=["user_input","context","model_info","action_history","history"],
         )
         
     def execute(self) -> GraphState:
@@ -1514,17 +1813,19 @@ class ActionsAnalyzer(AgentBase):
         llm_chain = prompt | self.json_model | JsonOutputParser()
         
         ## Get the state
-        user_input = self.state['user_input']
+        user_input = self.state['consolidated_input']
         context = self.state['context']
         model_info = self.state['model_info']
         action_history = self.state['action_history']
+        history = self.state['history']
         num_steps = self.state['num_steps']
         num_steps += 1
 
         llm_output = llm_chain.invoke({"user_input": user_input,
                                        "context": context,
                                        "model_info": model_info,
-                                       "action_history": action_history})
+                                       "action_history": action_history,
+                                       "history": history})
         
         if self.debug:
             print("---ACTIONS ANALYZER---")

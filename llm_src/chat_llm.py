@@ -1,5 +1,7 @@
 import os
 import yaml
+import glob
+import pickle
 import llm_src.agents as agents
 import llm_src.routers as routers
 import llm_src.printers as printers
@@ -8,11 +10,14 @@ from abc import ABC
 from langchain_groq import ChatGroq
 from llm_src.state import GraphState
 from langgraph.graph import END, StateGraph
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.tools.tavily_search import TavilySearchResults
+
+from llama_parse import LlamaParse
+import qdrant_client
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core import Settings
+from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.vector_stores.qdrant import QdrantVectorStore
 
 with open('secrets.yml', 'r') as f:
     secrets = yaml.load(f, Loader=yaml.SafeLoader)
@@ -24,28 +29,50 @@ chat_model = ChatGroq(
 json_model = ChatGroq(
             model="llama3-70b-8192",
         ).bind(response_format={"type": "json_object"})
+# High Token model (higher limit for tokens per request, but has daily limit)
+ht_model = ChatGroq(
+            model="llama-3.1-70b-versatile",
+        )
 
-debug = True
-
-class RAGEmbedder(ABC):
+class RAGRetriever(ABC):
     def __init__(self):
-        # Load the data that will be used by the retriever
-        loader = WebBaseLoader("https://docs.smith.langchain.com/user_guide")
-        docs = loader.load()
+        os.environ["LLAMA_CLOUD_API_KEY"] = secrets['llama-cloud'][0]
+        
+        pdf_list = [f.split('/')[-1] for f in glob.glob('rag_source/*.pdf')]
 
-        # Set the embedding model
-        embeddings = OllamaEmbeddings(model="llama3")
-
-        # Split the data and vectorize it
-        text_splitter = RecursiveCharacterTextSplitter()
-        documents = text_splitter.split_documents(docs)
-        vector = FAISS.from_documents(documents, embeddings)
-
-        # Define a chain to gather data and a retriever
-        self.retriever = vector.as_retriever()
+        try:
+            with open('rag_source/metadata.pkl', 'rb') as handle:
+                old_pdf_list = pickle.load(handle)
+            update_collection = False if old_pdf_list == pdf_list else True
+            print('No updates detected on the RAG source files, proceeding with current collection.')
+        except:
+            update_collection = True
+            print('RAG source files changed, updating collection.')
+        
+        client = qdrant_client.QdrantClient(api_key=secrets['qdrant']['api-key'], url=secrets['qdrant']['url'])
+        modelPath = "sentence-transformers/all-MiniLM-l6-v2"
+        embedding_model = HuggingFaceEmbedding(model_name=modelPath)
+        
+        Settings.embed_model = embedding_model
+        Settings.llm = chat_model
+            
+        if update_collection:
+            parsed_documents = LlamaParse(result_type='markdown').load_data(glob.glob('rag_source/*.pdf'))
+            
+            vector_store = QdrantVectorStore(client=client, collection_name='pdf_paper_rag')
+            storage_context = StorageContext.from_defaults(vector_store=vector_store)
+            index = VectorStoreIndex.from_documents(documents=parsed_documents, storage_context=storage_context, show_progress=True)
+            
+            with open('rag_source/metadata.pkl', 'wb') as handle:
+                pickle.dump(pdf_list, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            vector_store = QdrantVectorStore(client=client, collection_name='pdf_paper_rag')
+            index = VectorStoreIndex.from_vector_store(vector_store, embedding_model)
+        
+        self.query_engine = index.as_query_engine()
     
     def execute(self, query):
-        return self.retriever.invoke(query)
+        return self.query_engine.query(query)
     
 class WebSearchTool(ABC):
     def __init__(self):
@@ -55,7 +82,7 @@ class WebSearchTool(ABC):
     def execute(self, query):
         return self.web_search_tool.invoke({"query": query, "max_results": 3})
     
-retriever = RAGEmbedder().retriever
+retriever = RAGRetriever()
 web_tool = WebSearchTool()
 
 class GraphBuilder(ABC):
@@ -68,52 +95,58 @@ class GraphBuilder(ABC):
     # Agents (Nodes of the Graph)
     
     def date_getter(self, state: GraphState) -> GraphState:
-        return agents.DateGetter(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.DateGetter(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
     def type_identifier(self, state: GraphState) -> GraphState:
-        return agents.TypeIdentifier(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.TypeIdentifier(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
     def mixed(self, state: GraphState) -> GraphState:
-        return agents.Mixed(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.Mixed(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
-    def context_analyzer(self, state: GraphState) -> GraphState:
-        return agents.ContextAnalyzer(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
-    
-    def tool_selector(self, state: GraphState) -> GraphState:
-        return agents.ToolSelector(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
-    
-    def research_info_rag(self, state: GraphState) -> GraphState:
-        return agents.ResearchInfoRAG(chat_model, json_model, retriever, web_tool, state, self.app, self.debug).execute()
+    def query_generator(self, state: GraphState) -> GraphState:
+        return agents.QueryGenerator(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
 
     def research_info_web(self, state: GraphState) -> GraphState:
-        return agents.ResearchInfoWeb(chat_model, json_model, retriever, web_tool, state, self.app, self.debug).execute()
+        return agents.ResearchInfoWeb(chat_model, json_model, ht_model, retriever, web_tool, state, self.app, self.debug).execute()
 
     def calculator(self, state: GraphState) -> GraphState:
-        return agents.Calculator(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.Calculator(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def context_analyzer(self, state: GraphState) -> GraphState:
+        return agents.ContextAnalyzer(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
     def es_actions_analyzer(self, state: GraphState) -> GraphState:
-        return agents.ESActionsAnalyzer(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.ESActionsAnalyzer(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def input_consolidator(self, state: GraphState) -> GraphState:
+        return agents.InputConsolidator(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
 
     def run_model(self, state: GraphState) -> GraphState:
-        return agents.RunModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.RunModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
     def modify_model(self, state: GraphState) -> GraphState:
-        return agents.ModifyModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.ModifyModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def info_type_identifier(self, state: GraphState) -> GraphState:
+        return agents.InfoTypeIdentifier(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    
+    def rag_search(self, state: GraphState) -> GraphState:
+        return agents.ResearchInfoRAG(chat_model, json_model, ht_model, retriever, web_tool, state, self.app, self.debug).execute()
     
     def consult_model(self, state: GraphState) -> GraphState:
-        return agents.ConsultModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.ConsultModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
     def compare_model(self, state: GraphState) -> GraphState:
-        return agents.CompareModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.CompareModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
     def plot_model(self, state: GraphState) -> GraphState:
-        return agents.PlotModel(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.PlotModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
     def actions_analyzer(self, state: GraphState) -> GraphState:
-        return agents.ActionsAnalyzer(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.ActionsAnalyzer(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
 
     def output_generator(self, state: GraphState) -> GraphState:
-        return agents.OutputGenerator(chat_model, json_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.OutputGenerator(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
     
     # Printers (nodes of the Graph)
 
@@ -140,6 +173,9 @@ class GraphBuilder(ABC):
     def tool_router(self, state: GraphState) -> str:
         return routers.ToolRouter(state, self.debug).execute()
     
+    def info_type_router(self, state: GraphState) -> str:
+        return routers.InfoTypeRouter(state, self.debug).execute()
+    
     ##### Build the Graph #####
 
     def build(self) -> StateGraph:
@@ -149,14 +185,16 @@ class GraphBuilder(ABC):
         workflow.add_node("date_getter", self.date_getter)
         workflow.add_node("type_identifier", self.type_identifier)
         workflow.add_node("es_actions_analyzer", self.es_actions_analyzer)
+        workflow.add_node("input_consolidator", self.input_consolidator)
         workflow.add_node("context_analyzer", self.context_analyzer)
         workflow.add_node("mixed", self.mixed)
-        workflow.add_node("tool_selector", self.tool_selector)
-        workflow.add_node("research_info_rag", self.research_info_rag) # RAG search
+        workflow.add_node("query_generator", self.query_generator)
         workflow.add_node("research_info_web", self.research_info_web) # web search
         workflow.add_node("calculator", self.calculator)
         workflow.add_node("run_model", self.run_model)
         workflow.add_node("modify_model", self.modify_model)
+        workflow.add_node("info_type_identifier", self.info_type_identifier)
+        workflow.add_node("rag_search", self.rag_search)
         workflow.add_node("consult_model", self.consult_model)
         workflow.add_node("compare_model", self.compare_model)
         workflow.add_node("plot_model", self.plot_model)
@@ -175,8 +213,8 @@ class GraphBuilder(ABC):
             "type_identifier",
             self.type_router,
             {
-                "general": "context_analyzer",
-                "energy_system": "es_actions_analyzer",
+                "general": "query_generator",
+                "energy_system": "input_consolidator",
                 "mixed": "mixed",
             }
         )
@@ -186,27 +224,37 @@ class GraphBuilder(ABC):
             "mixed",
             self.mixed_router,
             {
-                "complete_data": "es_actions_analyzer",
-                "needs_data": "context_analyzer"
+                "complete_data": "input_consolidator",
+                "needs_data": "query_generator"
             }
         )
 
         # Energy System branch
+        workflow.add_edge("input_consolidator", "es_actions_analyzer")
         workflow.add_conditional_edges(
             "es_actions_analyzer",
             self.es_action_router,
             {
                 "run": "run_model",
                 "modify": "modify_model",
-                "consult": "consult_model",
+                "consult": "info_type_identifier",
                 "compare": "compare_model",
                 "plot": "plot_model",
                 "no_action": "output_generator"
             }
         )
+        workflow.add_conditional_edges(
+            "info_type_identifier",
+            self.info_type_router,
+            {
+                "paper": "rag_search",
+                "model": "consult_model",
+            }
+        )
         workflow.add_edge("run_model", "es_state_printer")
         workflow.add_edge("modify_model", "es_state_printer")
         workflow.add_edge("consult_model", "es_state_printer")
+        workflow.add_edge("rag_search", "es_state_printer")
         workflow.add_edge("compare_model", "es_state_printer")
         workflow.add_edge("plot_model", "es_state_printer")
         workflow.add_edge("es_state_printer", "actions_analyzer")
@@ -222,33 +270,31 @@ class GraphBuilder(ABC):
 
         # General branch
         workflow.add_conditional_edges(
+            "query_generator",
+            self.tool_router,
+            {
+                "web_search": "research_info_web",
+                "calculator": "calculator",
+                "direct_output": "output_generator"
+            },
+        )
+        workflow.add_edge("research_info_web", "context_analyzer")
+        workflow.add_edge("calculator", "context_analyzer")
+
+        workflow.add_conditional_edges(
             "context_analyzer",
             self.context_router,
             {
                 "ready_to_answer": "output_generator",
-                "need_context": "tool_selector",
-            },
+                "need_context": "context_state_printer",
+            }
         )
-
-        workflow.add_conditional_edges(
-            "tool_selector",
-            self.tool_router,
-            {
-                "RAG_retriever": "research_info_rag",
-                "web_search": "research_info_web",
-                "calculator": "calculator",
-                "user_input": "output_generator"
-            },
-        )
-        workflow.add_edge("research_info_rag", "context_state_printer")
-        workflow.add_edge("research_info_web", "context_state_printer")
-        workflow.add_edge("calculator", "context_state_printer")
 
         workflow.add_conditional_edges(
             "context_state_printer",
             self.type_router,
             {
-                "general": "context_analyzer",
+                "general": "query_generator",
                 "mixed": "mixed",
             }
         )

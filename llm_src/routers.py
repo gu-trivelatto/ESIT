@@ -102,14 +102,11 @@ class ToolRouter(BaseRouter):
         Returns:
             str: Next node to call
         """
-        selection = self.state['selected_tool']
+        selection = self.state['next_query']['tool']
         
         message = "---TOOL ROUTER---\nROUTE TO: "
         
-        if selection == 'RAG_retriever':
-            message += "RAG Retriever\n"
-            selection = "RAG_retriever"
-        elif selection == 'web_search':
+        if selection == 'web_search':
             message += "Web Search\n"
             selection = "web_search"
         elif selection == 'calculator':
@@ -117,7 +114,10 @@ class ToolRouter(BaseRouter):
             selection = "calculator"
         elif selection == "user_input":
             message += "User input\n"
-            selection = "user_input"
+            selection = "direct_output"
+        elif selection == "no_action":
+            message += "No actions\n"
+            selection = "direct_output"
             
         if self.debug:
             print(message)
@@ -143,3 +143,19 @@ class ContextRouter(BaseRouter):
             print(message)
             
         return selection
+    
+class InfoTypeRouter(BaseRouter):
+    def execute(self) -> str:
+        type = self.state['retrieval_type']
+
+        message = "---INFO TYPE ROUTER---\nROUTE TO: "
+
+        if type == 'paper':
+            message += "Paper retrieval\n"
+        elif type == 'model':
+            message += "Model retrieval\n"
+            
+        if self.debug:
+            print(message)
+            
+        return type
