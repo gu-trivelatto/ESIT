@@ -1,10 +1,12 @@
 from abc import ABC, abstractmethod
 from llm_src.state import GraphState
+from llm_src.helper import HelperFunctions
 
 class BaseRouter(ABC):
     def __init__(self, state: GraphState, debug):
         self.state = state
         self.debug = debug
+        self.helper = HelperFunctions()
     
     @abstractmethod
     def execute(self) -> str:
@@ -34,7 +36,7 @@ class TypeRouter(BaseRouter):
             selection = "mixed"
 
         if self.debug:
-            print(message)
+            self.helper.save_debug(message)
             
         return selection
 
@@ -52,7 +54,7 @@ class MixedRouter(BaseRouter):
             selection = "needs_data"
             
         if self.debug:
-            print(message)
+            self.helper.save_debug(message)
             
         return selection
 
@@ -89,7 +91,7 @@ class ESActionRouter(BaseRouter):
             selection = "no_action"
             
         if self.debug:
-            print(message)
+            self.helper.save_debug(message)
             
         return selection
     
@@ -120,7 +122,7 @@ class ToolRouter(BaseRouter):
             selection = "direct_output"
             
         if self.debug:
-            print(message)
+            self.helper.save_debug(message)
             
         return selection
 
@@ -140,7 +142,7 @@ class ContextRouter(BaseRouter):
             selection = "need_context"
             
         if self.debug:
-            print(message)
+            self.helper.save_debug(message)
             
         return selection
     
@@ -156,6 +158,6 @@ class InfoTypeRouter(BaseRouter):
             message += "Model retrieval\n"
             
         if self.debug:
-            print(message)
+            self.helper.save_debug(message)
             
         return type

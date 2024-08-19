@@ -16,6 +16,7 @@ from CESM.core.data_access import DAO
 from openpyxl import load_workbook
 from abc import ABC, abstractmethod
 from llm_src.state import GraphState
+from llm_src.helper import HelperFunctions
 from langchain.schema import Document
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -23,228 +24,7 @@ from langchain_core.output_parsers import JsonOutputParser
 
 # TODO standardize variable names used from the state
 # TODO standardize the way the agents interact with the state
-
-class HelperFunctions(ABC):
-    def __init__(self):
-        pass
-
-    def get_params_and_cs_list(self, techmap_file):
-        tmap = pd.ExcelFile(techmap_file)
-        df = pd.read_excel(tmap,"ConversionSubProcess")
-        
-        # Put the column names (parameters) and the first row (descriptions) together in an array
-        parameters = df.columns[10:-2].to_list()
-        descriptions = df.iloc[0,10:-2].to_list()
-        param_n_desc = []
-        for i in range(len(parameters)):
-            param_n_desc.append(f'{parameters[i]} - {descriptions[i]}')
-            
-        # Filter the conversion processes and generate a new column with the full name 'cp@cin@cout'
-        df = df.loc[(df['conversion_process_name'] != 'DEBUG') & (df['conversion_process_name'].notnull())]
-        df = df.iloc[:,0:3]
-        df['cs'] = df[['conversion_process_name', 'commodity_in', 'commodity_out']].agg('@'.join, axis=1)
-        
-        return param_n_desc, df['cs'].to_list()
-
-    def get_populated_params_and_cs_list(self, techmap_file, cs_selection):
-        tmap = pd.ExcelFile(techmap_file)
-        df = pd.read_excel(tmap,"ConversionSubProcess")
-
-        new_row = [col if type(df.iloc[0][col]) != str else f"{col} - {df.iloc[0][col]}" for col in df.columns]
-        df.columns = new_row
-
-        df = df.loc[(df['conversion_process_name'] != 'DEBUG') & (df['conversion_process_name'].notnull())]
-        df['cs'] = df[['conversion_process_name', 'commodity_in', 'commodity_out']].agg('@'.join, axis=1)
-
-        populated_params = {cs: None for cs in cs_selection}
-        for i in range(len(cs_selection)):
-            df_filtered = df.loc[df['cs'] == cs_selection[i]]
-            populated_params[cs_selection[i]] = df_filtered.iloc[:, 10:-3].dropna(axis=1).columns.to_list()
-
-        return populated_params
-
-    def get_values(self, techmap_file, selection_dict):
-        tmap = pd.ExcelFile(techmap_file)
-        df = pd.read_excel(tmap,"ConversionSubProcess")
-        units = df.iloc[1,:]
-        df = df.loc[(df['conversion_process_name'] != 'DEBUG') & (df['conversion_process_name'].notnull())]
-        df['cs'] = df[['conversion_process_name', 'commodity_in', 'commodity_out']].agg('@'.join, axis=1)
-        result = {}
-        
-        for key, value in selection_dict.items():
-            df_filtered = df.loc[df['cs'] == key]
-            result[key] = []
-            for param in value:
-                result[key].append([param, df_filtered[param].values[0], units[param]])
-
-        return result
-
-    def get_scenario_params(self, techmap_file):
-        tmap = pd.ExcelFile(techmap_file)
-        df = pd.read_excel(tmap,"Scenario")
-
-        base_index = df.index[df['scenario_name'] == 'Base'].tolist()[0]
-        discount_rate = df['discount_rate'][base_index]
-        annual_co2_limit = df['annual_co2_limit'][base_index]
-        co2_price = df['co2_price'][base_index]
-        
-        if math.isnan(discount_rate):
-            discount_rate = None
-        if math.isnan(co2_price):
-            co2_price = None
-
-        return {'discount_rate': discount_rate, 'annual_co2_limit': annual_co2_limit, 'co2_price': co2_price}
-
-    def get_conversion_processes(self, techmap_file):
-        tmap = pd.ExcelFile(techmap_file)
-        df = pd.read_excel(tmap,"Commodity")
-
-        cond = df['commodity_name'] != 'Dummy'
-        cond = cond & (df['commodity_name'] != 'DEBUG')
-        cond = cond & (df['commodity_name'].str.contains('Help') == False)
-
-        return df['commodity_name'][cond].tolist()
-    
-    def get_yearly_variations(self, techmap_file):
-        tmap = pd.ExcelFile(techmap_file)
-        df = pd.read_excel(tmap,"ConversionSubProcess")
-
-        results = []
-        for col in df.columns[10:-2]:
-            cond = (~df[col].isna()) & (df[col].str.contains(';'))
-            values = df[col][cond].tolist()
-            CPs = df['conversion_process_name'][cond].tolist()
-            cin = df['commodity_in'][cond].tolist()
-            cout = df['commodity_out'][cond].tolist()
-            for i in range(len(values)):
-                results = results + [[f'{CPs[i]}@{cin[i]}@{cout[i]}', values[i]]]
-            
-        return results
-
-    def get_cs_param_selection(self, techmap_file, cs_list, param_list):
-        tmap = pd.ExcelFile(techmap_file)
-        df = pd.read_excel(tmap,"ConversionSubProcess")
-        result = []
-        
-        for cs in cs_list:
-            split_cs = cs.split('@')
-
-            if len(split_cs) > 1:
-                cond = df['conversion_process_name'] == split_cs[0]
-                cond = cond & (df['commodity_in'] == split_cs[1])
-                cond = cond & (df['commodity_out'] == split_cs[2])
-            else:
-                cond = df['conversion_process_name'] == split_cs[0]
-            
-            for param in param_list:
-                try:
-                    if len(split_cs) > 1:
-                        result = result + [cs, param, df[param][cond].values[0], df[param][1]]
-                    else:
-                        for i in range(sum(cond)):
-                            idx = df[param][cond].index[i]
-                            cs = f'{split_cs[0]}@{df["commodity_in"][idx]}@{df["commodity_out"][idx]}'
-                            result = result + [cs, param, df[param][cond].values[i], df[param][1]]
-                except:
-                    pass
-
-        return result
-
-    def consult_info(self, query, techmap_file):
-        consult_type = query['consult_type']
-        
-        if consult_type == 'yearly_variation':
-            info = self.get_yearly_variations(techmap_file)
-        elif consult_type == 'cs_param_selection':
-            info = self.get_cs_param_selection(techmap_file, query['cs'], query['param'])
-        else:
-            info = 'Consult type not recognized'
-        
-        return info
-
-    def modify_scenario_sheet(self, workbook, new_values):
-        scen_sheet = workbook['Scenario']
-        new_values = new_values['new_values']
-        coords = ['','','','']
-        
-        # Find the coordinates in the spreadsheet
-        for idx, row in enumerate(scen_sheet.rows):
-            # Get the horizontal coordinate of each parameter
-            if idx == 0:
-                for i in range(len(row)):
-                    if row[i].value == 'scenario_name':
-                        coords[0] = row[i].coordinate[0]
-                    if row[i].value == 'discount_rate':
-                        coords[1] = row[i].coordinate[0]
-                    if row[i].value == 'annual_co2_limit':
-                        coords[2] = row[i].coordinate[0]
-                    if row[i].value == 'co2_price':
-                        coords[3] = row[i].coordinate[0]
-            # Get the vertical coordinate of the base scenario and
-            # complete the others with it
-            else:
-                if scen_sheet[f'{coords[0]}{idx+1}'].value == 'Base':
-                    for i in range(len(coords)):
-                        coords[i] = f'{coords[i]}{idx+1}'
-                    break
-        
-        # Apply the changes to the table
-        result = []
-        col_names = ['discount_rate', 'annual_co2_limit', 'co2_price']
-        for i in range(1,4):
-            old_value = scen_sheet[coords[i]].value
-            if old_value != new_values[i-1]:
-                scen_sheet[coords[i]].value = new_values[i-1]
-                result = result + [f'{col_names[i-1]} modified from {old_value} to {new_values[i-1]}']
-        
-        return workbook, result
-    
-    def modify_cs_sheet(self, workbook, new_params):
-        cs_sheet = workbook['ConversionSubProcess']
-        new_params = new_params['values']
-
-        result = []
-        # Iterate over a dict of CSs, that contain a list of lists
-        # {cs_name: [[param_name, new_value, unit], [param_name, new_value, unit]]}
-        for cs_name, value in new_params.items():
-            for param in value:
-                param_name = param[0]
-                new_value = param[1]
-                unit = param[2]
-                
-                # Skip param if the value is empty
-                if not new_value:
-                    continue
-                
-                # Treat the param name if it came with the description from the agent
-                if '-' in param_name:
-                    split_param = param_name.split('-')
-                    param_name = split_param[0].strip()
-                
-                # Initialize indexes as 0
-                param_idx = '0'
-                cs_idx = '0'
-                # Find the right row and column for the combination of cs and param
-                for idx, row in enumerate(cs_sheet.rows):
-                    if idx == 0:
-                        for i in range(len(row)):
-                            if row[i].value == param_name:
-                                param_idx = row[i].coordinate
-                    else:
-                        if f'{row[0].value}@{row[1].value}@{row[2].value}' == cs_name:
-                            cs_idx = row[0].coordinate
-                
-                # If any of the indexes are 0, it failed
-                if param_idx == '0' or cs_idx == '0':
-                    result = result + [f'{param_name} of {cs_name} not found.']
-                # Else, apply the new value
-                else:
-                    old_value = cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value
-                    cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value = new_value
-                    
-                    result = result + [f'{param_name} of {cs_name} modified from {old_value} to {new_value} ({unit})']
-                
-        return workbook, result
+# TODO add a filtering agent at the start to bypass simple conversation to go directly to the output_generator
 
 class InputGetter(ABC):
     def __init__(self, *args, **kwargs):
@@ -318,6 +98,7 @@ class AgentBase(ABC):
         self.selected_value = None
         self.base_model = base_model
         self.mod_model = mod_model
+        self.helper = HelperFunctions()
         
     def confirm_selection(self, selected_value):
         self.selected_value = selected_value
@@ -340,6 +121,7 @@ class ResearchAgentBase(ABC):
         self.debug = debug
         self.app = app
         self.selected_value = None
+        self.helper = HelperFunctions()
         
     def get_answer_analyzer_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
@@ -384,8 +166,8 @@ class DateGetter(AgentBase):
         result = f'The current date and time are {current_date}'
         
         if self.debug:
-            print("---DATE GETTER TOOL---")
-            print(f'CURRENT DATE: {current_date}\n')
+            self.helper.save_debug("---DATE GETTER TOOL---")
+            self.helper.save_debug(f'CURRENT DATE: {current_date}\n')
 
         self.state['context'] = [result]
         self.state['num_steps'] = num_steps
@@ -446,10 +228,10 @@ class TypeIdentifier(AgentBase):
         selected_type = llm_output['input_type']
         
         if self.debug:
-            print("---TYPE IDENTIFIER---")
-            print(f'USER INPUT: {user_input.rstrip()}')
-            print(f'IDENTIFIED TYPE: {selected_type}\n')
-            print(history)
+            self.helper.save_debug("---TYPE IDENTIFIER---")
+            self.helper.save_debug(f'USER INPUT: {user_input.rstrip()}')
+            self.helper.save_debug(f'IDENTIFIED TYPE: {selected_type}\n')
+            self.helper.save_debug(history)
         
         self.state['input_type'] = selected_type
         self.state['num_steps'] = num_steps
@@ -497,9 +279,9 @@ class InputConsolidator(AgentBase):
         consolidated_input = llm_output['consolidated_input']
         
         if self.debug:
-            print("---INPUT CONSOLIDATOR---")
-            print(f'USER INPUT: {user_input.rstrip()}')
-            print(f'CONSOLIDATED INPUT: {consolidated_input}\n')
+            self.helper.save_debug("---INPUT CONSOLIDATOR---")
+            self.helper.save_debug(f'USER INPUT: {user_input.rstrip()}')
+            self.helper.save_debug(f'CONSOLIDATED INPUT: {consolidated_input}\n')
             
         self.state['consolidated_input'] = consolidated_input
         self.state['num_steps'] = num_steps
@@ -527,7 +309,8 @@ class ESActionsAnalyzer(AgentBase):
             1. The user asked about a specific scenario layout, for example "what would happend if we reduce
             the CO2 limit by half?", in this kind of scenario you will modify the model to reach what was asked,
             run the simulation and compare/plot the results to the user to check what happened in the proposed
-            situation;
+            situation. Don't forget to get an analysis of the result after the run, it's important that the
+            user get an explanation and a visualization of the results;
             2. The user asked a more direct question such as "how are CHPs modeled?" or "show me the sankey
             diagram of the model", in this kind of scenario you will limit your actions to what the user is
             asking directly; \n
@@ -569,9 +352,9 @@ class ESActionsAnalyzer(AgentBase):
         selected_action = llm_output['action']
         
         if self.debug:
-            print("---ENERGY SYSTEM ACTIONS---")
-            print(f'USER INPUT: {user_input.rstrip()}')
-            print(f'SELECTED ACTION: {selected_action}\n')
+            self.helper.save_debug("---ENERGY SYSTEM ACTIONS---")
+            self.helper.save_debug(f'USER INPUT: {user_input.rstrip()}')
+            self.helper.save_debug(f'SELECTED ACTION: {selected_action}\n')
             
         self.state['next_action'] = selected_action
         self.state['num_steps'] = num_steps
@@ -640,9 +423,9 @@ class QueryGenerator(AgentBase):
                                    })
         
         if self.debug:
-            print("---CONTEXT ANALYZER---")
-            print(f'NEXT QUERY: {llm_output}\n')
-            print(history)
+            self.helper.save_debug("---CONTEXT ANALYZER---")
+            self.helper.save_debug(f'NEXT QUERY: {llm_output}\n')
+            self.helper.save_debug(history)
         
         self.state['query_history'] = query_history + [llm_output['next_query']]
         self.state['next_query'] = llm_output
@@ -693,10 +476,10 @@ class Mixed(AgentBase):
         is_data_complete = llm_output['is_data_complete']
         
         if self.debug:
-            print("---TOOL SELECTION---")
-            print(f'USER INPUT: {user_input.rstrip()}')
-            print(f'CONTEXT: {context}')
-            print(f'DATA IS COMPLETE: {is_data_complete}\n')
+            self.helper.save_debug("---TOOL SELECTION---")
+            self.helper.save_debug(f'USER INPUT: {user_input.rstrip()}')
+            self.helper.save_debug(f'CONTEXT: {context}')
+            self.helper.save_debug(f'DATA IS COMPLETE: {is_data_complete}\n')
             
         self.state['is_data_complete'] = is_data_complete
         self.state['num_steps'] = num_steps
@@ -745,8 +528,8 @@ class ContextAnalyzer(AgentBase):
         llm_output = llm_chain.invoke({"user_input": user_input, "context": context, "history": history})
         
         if self.debug:
-            print("---TOOL SELECTION---")
-            print(f'READY TO ANSWER: {llm_output["ready_to_answer"]}\n')
+            self.helper.save_debug("---TOOL SELECTION---")
+            self.helper.save_debug(f'READY TO ANSWER: {llm_output["ready_to_answer"]}\n')
         
         self.state['next_query'] = llm_output
         self.state['num_steps'] = num_steps
@@ -774,7 +557,7 @@ class ResearchInfoWeb(ResearchAgentBase):
         
     def execute(self) -> GraphState:
         if self.debug:
-            print("---RESEARCH INFO SEARCHING---")
+            self.helper.save_debug("---RESEARCH INFO SEARCHING---")
             
         query = self.state['next_query']['next_query']
         context = self.state['context']
@@ -803,8 +586,8 @@ class ResearchInfoWeb(ResearchAgentBase):
             else:
                 web_results = 'No results'
             if self.debug:
-                print(f'KEYWORD {idx}: {keyword}')
-                print(f'RESULTS FOR KEYWORD {idx}: {web_results}')
+                self.helper.save_debug(f'KEYWORD {idx}: {keyword}')
+                self.helper.save_debug(f'RESULTS FOR KEYWORD {idx}: {web_results}')
             if full_searches is not None:
                 full_searches.append(web_results)
             else:
@@ -813,8 +596,8 @@ class ResearchInfoWeb(ResearchAgentBase):
         processed_searches = answer_analyzer_chain.invoke({"query": query, "search_results": full_searches, "context": context})
         
         if self.debug:
-            print(f'FULL RESULTS: {full_searches}\n')
-            print(f'PROCESSED RESULT: {processed_searches}\n')
+            self.helper.save_debug(f'FULL RESULTS: {full_searches}\n')
+            self.helper.save_debug(f'PROCESSED RESULT: {processed_searches}\n')
         
         self.state['context'] = context + [processed_searches]
         self.state['num_steps'] = num_steps
@@ -867,15 +650,15 @@ class Calculator(AgentBase):
         equation = llm_output['equation']
         
         if self.debug:
-            print("---CALCULATOR TOOL---")
-            print(f'EQUATION: {equation}')
+            self.helper.save_debug("---CALCULATOR TOOL---")
+            self.helper.save_debug(f'EQUATION: {equation}')
         
         result = eval(equation)
         
         str_result = f'{equation} = {result}'
         
         if self.debug:
-            print(f'RESULT: {str_result}\n')
+            self.helper.save_debug(f'RESULT: {str_result}\n')
             
         self.state['context'] = context + [str_result]
         self.state['num_steps'] = num_steps
@@ -894,7 +677,7 @@ class RunModel(AgentBase):
         num_steps += 1
         
         if self.debug:
-            print('---SIMULATION RUNNER---')
+            self.helper.save_debug('---SIMULATION RUNNER---')
         
         try:
             model_name = self.mod_model.split('/')[-1]
@@ -918,22 +701,22 @@ class RunModel(AgentBase):
 
             # Parse
             if self.debug:
-                print("\n#-- Parsing started --#")
+                self.helper.save_debug("\n#-- Parsing started --#")
             parser.parse()
 
             # Build
             if self.debug:
-                print("\n#-- Building model started --#")
+                self.helper.save_debug("\n#-- Building model started --#")
             model_instance = Model(conn=conn)
 
             # Solve
             if self.debug:
-                print("\n#-- Solving model started --#")
+                self.helper.save_debug("\n#-- Solving model started --#")
             model_instance.solve()
 
             # Save
             if self.debug:
-                print("\n#-- Saving model started --#")
+                self.helper.save_debug("\n#-- Saving model started --#")
             model_instance.save_output()
 
             
@@ -993,6 +776,9 @@ class ModifyModel(AgentBase):
             There are three parameters you can change: discount_rate, annual_co2_limit and co2_price.
             In SCEN_PARAMS you have a dictionary with the current values for each of them, and you should
             decide how to change them to fulfill the user's request. \n
+            
+            YOU SHOULD ONLY MODIFY THE PARAMETERS IF THE USER CLEARLY STATES THAT HE WANTS ONE OF THE
+            SCENARIO PARAMETERS TO BE MODIFIED. \n
             
             You must output a JSON object with a single element 'new_values' that contains the modified
             values for the three in a three elements list. If you haven't modified some of them, simply
@@ -1162,7 +948,7 @@ class ModifyModel(AgentBase):
 
     def execute(self) -> GraphState:
         if self.debug:
-            print('---MODEL MODIFIER---')
+            self.helper.save_debug('---MODEL MODIFIER---')
         
         helper = HelperFunctions()
         
@@ -1249,12 +1035,12 @@ class ModifyModel(AgentBase):
             result = ['Failed to save the modifications']
         
         if self.debug:
-            print(f'FINAL RESULTS OF MODIFICATION:\n{result}\n')
+            self.helper.save_debug(f'FINAL RESULTS OF MODIFICATION:\n{result}\n')
         
         self.state['num_steps'] = num_steps
         self.state['scen_modded'] = scen_modded
-        self.state['context'] = context + result
-        self.state['actions_history'] = action_history + result
+        self.state['context'] = context + [f'The model was modified as follows:{result}']
+        self.state['action_history'] = action_history + ['The model was successfully modified!']
         
         return self.state
 
@@ -1301,8 +1087,8 @@ class InfoTypeIdentifier(AgentBase):
         llm_output = llm_chain.invoke({"user_input": user_input})
         
         if self.debug:
-            print("---INFO TYPE IDENTIFIER---")
-            print(f'RETRIEVAL TYPE: {llm_output["type"]}\n')
+            self.helper.save_debug("---INFO TYPE IDENTIFIER---")
+            self.helper.save_debug(f'RETRIEVAL TYPE: {llm_output["type"]}\n')
         
         self.state['retrieval_type'] = llm_output['type']
         self.state['num_steps'] = num_steps
@@ -1342,7 +1128,7 @@ class ResearchInfoRAG(ResearchAgentBase):
         answer_analyzer_chain = answer_analyzer_prompt | self.chat_model | StrOutputParser()
         
         if self.debug:
-            print("---RAG PDF PAPER RETRIEVER---")
+            self.helper.save_debug("---RAG PDF PAPER RETRIEVER---")
             
         query = self.state['consolidated_input']
         context = self.state['context']
@@ -1356,15 +1142,15 @@ class ResearchInfoRAG(ResearchAgentBase):
         for idx, question in enumerate(questions):
             temp_docs = self.retriever.execute(question)
             if self.debug:
-                print(f'QUESTION {idx}: {question}')
-                print(f'ANSWER FOR QUESTION {idx}: {temp_docs.response}')
+                self.helper.save_debug(f'QUESTION {idx}: {question}')
+                self.helper.save_debug(f'ANSWER FOR QUESTION {idx}: {temp_docs.response}')
             question_results = question + '\n\n' + temp_docs.response + "\n\n\n"
             if rag_results is not None:
                 rag_results.append(question_results)
             else:
                 rag_results = [question_results]
         if self.debug:
-            print(f'FULL ANSWERS: {rag_results}\n')
+            self.helper.save_debug(f'FULL ANSWERS: {rag_results}\n')
         
         processed_searches = answer_analyzer_chain.invoke({"query": query, "search_results": rag_results, "context": context})
         # TODO find a way of referencing the used pdfs
@@ -1510,8 +1296,8 @@ class ConsultModel(AgentBase):
                                              "model_infos": model_info})
         
         if self.debug:
-            print('---CONSULT MODEL---')
-            print(f'ANALYZER OUTPUT: {llm_output}')
+            self.helper.save_debug('---CONSULT MODEL---')
+            self.helper.save_debug(f'ANALYZER OUTPUT: {llm_output}')
 
         info = helper.consult_info(llm_output, self.base_model)
         
@@ -1523,7 +1309,7 @@ class ConsultModel(AgentBase):
                                                    "info": info})
         
         if self.debug:
-            print(f'GATHERED INFO ABOUT THE MODEL: {summed_up_info}')
+            self.helper.save_debug(f'GATHERED INFO ABOUT THE MODEL: {summed_up_info}')
         
         self.state['num_steps'] = num_steps
         self.state['action_history'] = action_history + ['The model was consulted']
@@ -1568,6 +1354,7 @@ class CompareModel(AgentBase):
     def execute(self) -> GraphState:
         user_input = self.state['consolidated_input']
         context = self.state['context']
+        action_history = self.state['action_history']
         num_steps = self.state['num_steps']
         num_steps += 1
 
@@ -1639,10 +1426,11 @@ class CompareModel(AgentBase):
         llm_output = llm_chain.invoke({"user_input": user_input, "output_variations": variations_dict, "costs_variation": variations_single})
         
         if self.debug:
-            print("---COMPARE RESULTS---")
-            print(f'ANALYSIS: {llm_output}\n')
+            self.helper.save_debug("---COMPARE RESULTS---")
+            self.helper.save_debug(f'ANALYSIS: {llm_output}\n')
         
         self.state['context'] = context + [llm_output]
+        self.state['action_history'] = action_history + ['The results were successfully analyzed!']
         self.state['num_steps'] = num_steps
         
         return self.state
@@ -1695,7 +1483,7 @@ class PlotModel(AgentBase):
         num_steps += 1
         
         if self.debug:
-            print('---PLOT RESULTS---')
+            self.helper.save_debug('---PLOT RESULTS---')
         
         prompt = self.get_prompt_template()
         llm_chain = prompt | self.json_model | JsonOutputParser()
@@ -1704,7 +1492,6 @@ class PlotModel(AgentBase):
         simulation = f'{self.base_model.split("/")[-1][:-5]}-Base'
 
         db_path = os.path.join(runs_dir_path, simulation, 'db.sqlite')
-        print(db_path)
         conn = sqlite3.connect(db_path)
         dao = DAO(conn)
         plotter = Plotter(dao)
@@ -1735,6 +1522,7 @@ class PlotModel(AgentBase):
                                    "years": years})
 
         selected_plots = output['plots']
+        successful_plots = False
 
         for plot in selected_plots:
             plot_type = plot[0]
@@ -1742,33 +1530,50 @@ class PlotModel(AgentBase):
             commodity = plot[2]
             year = plot[3]
             
-            p_type = getattr(PlotType, plot_type)
+            if not(commodity in commodities) or not(year in years):
+                continue
             
-            if plot_type == 'Bar':
-                # Combination
-                if plot_subtype in  ['PRIMARY_ENERGY', 'CO2_EMISSION']:
-                    plotter.plot_bars(getattr(p_type, plot_subtype))
-                else:
-                    plotter.plot_bars(getattr(p_type, plot_subtype), commodity=commodity)
-
-            elif plot_type == 'TimeSeries':
-                plotter.plot_timeseries(getattr(p_type, plot_subtype), year=year, commodity=commodity)
-            
-            elif plot_type == 'Sankey':
-                f = plotter.plot_sankey(year)
-                f.show()
-
-            elif plot_type == 'SingleValue':
-                plotter.plot_single_value([getattr(p_type, plot_subtype)])
+            try:
+                p_type = getattr(PlotType, plot_type)
                 
-        message = """
-        The requested data was successfully plotted and shown to the user, there is no need to try to manipulate any
-        data to generate a visual plot to the user. Simply tell him that it was plotted and the data is now available
-        for him to check.
-        """
+                if plot_type == 'Bar':
+                    # Combination
+                    if plot_subtype in  ['PRIMARY_ENERGY', 'CO2_EMISSION']:
+                        plotter.plot_bars(getattr(p_type, plot_subtype))
+                    else:
+                        plotter.plot_bars(getattr(p_type, plot_subtype), commodity=commodity)
+
+                elif plot_type == 'TimeSeries':
+                    plotter.plot_timeseries(getattr(p_type, plot_subtype), year=year, commodity=commodity)
+                
+                elif plot_type == 'Sankey':
+                    f = plotter.plot_sankey(year)
+                    f.show()
+
+                elif plot_type == 'SingleValue':
+                    plotter.plot_single_value([getattr(p_type, plot_subtype)])
+
+                successful_plots = True
+            except:
+                pass
+        
+        if successful_plots:
+            message = """
+            The requested data was successfully plotted and shown to the user, there is no need to try to manipulate any
+            data to generate a visual plot to the user. Simply tell him that it was plotted and the data is now available
+            for him to check.
+            """
+            result = ['The requested data was successfully plotted!']
+        else:
+            message = """
+            The requested data was not successfully plotted, however, there is no need to try to manipulate any
+            data to generate a visual plot to the user. Simply tell him that a problem occured and he should try
+            again later.
+            """
+            result = ['The requested data failed to be plotted.']
             
         self.state['num_steps'] = num_steps
-        self.state['action_history'] = action_history + ['The requested data was successfully plotted!']
+        self.state['action_history'] = action_history + result
         self.state['context'] = context + [message]
         
         return self.state
@@ -1787,6 +1592,16 @@ class ActionsAnalyzer(AgentBase):
             the model that may be needed to answer the user, and ACTION_HISTORY shows you what
             was already done to reach the goal of fulfilling the user's request. \n
             
+            Normally the USER_INPUT will be one of the following two types:
+            1. The user asked about a specific scenario layout, for example "what would happend if we reduce
+            the CO2 limit by half?", in this kind of scenario you can only indicate that you are ready to answer
+            if all necessary actions were executed, namely, you need to ensure that model was successfully modified,
+            the simulation runned and that you've got an analysis of the results (that will also be confirmed in
+            ACTION_HISTORY) potentially with the plot of some data;
+            2. The user asked a more direct question such as "how are CHPs modeled?" or "show me the sankey
+            diagram of the model", in this kind of scenario you will just check if all cited actions were
+            concluded before saying you're ready to answer; \n
+            
             You can also always check the CHAT_HISTORY to check if the input provided by the
             user references another past message. \n
             
@@ -1795,7 +1610,7 @@ class ActionsAnalyzer(AgentBase):
             the input. ALWAYS WRITE THE BOOLEAN IN LOWERCASE, OTHERWISE THE JSON PARSE WILL FAIL. \n
             
             If you find messages stating that something failed during the execution of any action
-            taken by the modeling tools, you can also output 'ready_to_answer' as true. The
+            taken by the modeling tools, you MUST output 'ready_to_answer' as true. The
             output generator will deal with telling the user that it failed. \n
             
             Always use double quotes in the JSON object. \n
@@ -1830,8 +1645,8 @@ class ActionsAnalyzer(AgentBase):
                                        "history": history})
         
         if self.debug:
-            print("---ACTIONS ANALYZER---")
-            print(f'IS READY TO ANSWER: {llm_output["ready_to_answer"]}\n')
+            self.helper.save_debug("---ACTIONS ANALYZER---")
+            self.helper.save_debug(f'IS READY TO ANSWER: {llm_output["ready_to_answer"]}\n')
         
         self.state['next_query'] = llm_output
         self.state['num_steps'] = num_steps
@@ -1907,8 +1722,8 @@ class OutputGenerator(AgentBase):
         llm_output = llm_chain.invoke({"user_input": user_input, "context": context, "action_history": action_history, "history": history})
         
         if self.debug:
-            print("---GENERATE OUTPUT---")
-            print(f'GENERATED OUTPUT:\n{llm_output}\n')
+            self.helper.save_debug("---GENERATE OUTPUT---")
+            self.helper.save_debug(f'GENERATED OUTPUT:\n{llm_output}\n')
         
         if '\nSource:\n- None' in llm_output:
             llm_output = llm_output.replace('\nSource:\n- None','')

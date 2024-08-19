@@ -1,5 +1,6 @@
 secrets.yml
 chat_history.pkl
+debug.log
 __pycache__/
 test*
 rag_source/metadata.pkl
