@@ -1,7 +1,6 @@
 import os
 import math
 import sqlite3
-import subprocess
 import numpy as np
 import pandas as pd
 import customtkinter
@@ -19,7 +18,6 @@ from abc import ABC, abstractmethod
 from llm_src.state import GraphState
 from langchain.schema import Document
 from langchain.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.output_parsers import JsonOutputParser
 
@@ -33,26 +31,53 @@ class HelperFunctions(ABC):
     def get_params_and_cs_list(self, techmap_file):
         tmap = pd.ExcelFile(techmap_file)
         df = pd.read_excel(tmap,"ConversionSubProcess")
-
-        conversion_processes = np.asarray(df.iloc[:,0].dropna())
-        mask = np.where(conversion_processes != 'DEBUG')
-        conversion_processes = conversion_processes[mask]
-        parameters = np.asarray(df.columns[4:])
-        descriptions = np.asarray(df.iloc[0,4:])
-        param_n_desc = np.empty((len(parameters),1),dtype=object)
         
+        # Put the column names (parameters) and the first row (descriptions) together in an array
+        parameters = df.columns[10:-2].to_list()
+        descriptions = df.iloc[0,10:-2].to_list()
+        param_n_desc = []
         for i in range(len(parameters)):
-            param_n_desc[i] = f'{parameters[i]} - {descriptions[i]}'
+            param_n_desc.append(f'{parameters[i]} - {descriptions[i]}')
+            
+        # Filter the conversion processes and generate a new column with the full name 'cp@cin@cout'
+        df = df.loc[(df['conversion_process_name'] != 'DEBUG') & (df['conversion_process_name'].notnull())]
+        df = df.iloc[:,0:3]
+        df['cs'] = df[['conversion_process_name', 'commodity_in', 'commodity_out']].agg('@'.join, axis=1)
+        
+        return param_n_desc, df['cs'].to_list()
 
-        cs = np.asarray(df.iloc[:,0:3].dropna())
-        mask = np.where(cs[:,0] != 'DEBUG')
-        cs = cs[mask]
-        conversion_subprocesses = np.empty((len(cs),1),dtype=object)
+    def get_populated_params_and_cs_list(self, techmap_file, cs_selection):
+        tmap = pd.ExcelFile(techmap_file)
+        df = pd.read_excel(tmap,"ConversionSubProcess")
 
-        for i in range(len(cs)):
-            conversion_subprocesses[i] = f'{cs[i,0]}@{cs[i,1]}@{cs[i,2]}'
+        new_row = [col if type(df.iloc[0][col]) != str else f"{col} - {df.iloc[0][col]}" for col in df.columns]
+        df.columns = new_row
 
-        return param_n_desc, conversion_subprocesses
+        df = df.loc[(df['conversion_process_name'] != 'DEBUG') & (df['conversion_process_name'].notnull())]
+        df['cs'] = df[['conversion_process_name', 'commodity_in', 'commodity_out']].agg('@'.join, axis=1)
+
+        populated_params = {cs: None for cs in cs_selection}
+        for i in range(len(cs_selection)):
+            df_filtered = df.loc[df['cs'] == cs_selection[i]]
+            populated_params[cs_selection[i]] = df_filtered.iloc[:, 10:-3].dropna(axis=1).columns.to_list()
+
+        return populated_params
+
+    def get_values(self, techmap_file, selection_dict):
+        tmap = pd.ExcelFile(techmap_file)
+        df = pd.read_excel(tmap,"ConversionSubProcess")
+        units = df.iloc[1,:]
+        df = df.loc[(df['conversion_process_name'] != 'DEBUG') & (df['conversion_process_name'].notnull())]
+        df['cs'] = df[['conversion_process_name', 'commodity_in', 'commodity_out']].agg('@'.join, axis=1)
+        result = {}
+        
+        for key, value in selection_dict.items():
+            df_filtered = df.loc[df['cs'] == key]
+            result[key] = []
+            for param in value:
+                result[key].append([param, df_filtered[param].values[0], units[param]])
+
+        return result
 
     def get_scenario_params(self, techmap_file):
         tmap = pd.ExcelFile(techmap_file)
@@ -137,8 +162,89 @@ class HelperFunctions(ABC):
         
         return info
 
-    def modify_model(self):
-        pass
+    def modify_scenario_sheet(self, workbook, new_values):
+        scen_sheet = workbook['Scenario']
+        new_values = new_values['new_values']
+        coords = ['','','','']
+        
+        # Find the coordinates in the spreadsheet
+        for idx, row in enumerate(scen_sheet.rows):
+            # Get the horizontal coordinate of each parameter
+            if idx == 0:
+                for i in range(len(row)):
+                    if row[i].value == 'scenario_name':
+                        coords[0] = row[i].coordinate[0]
+                    if row[i].value == 'discount_rate':
+                        coords[1] = row[i].coordinate[0]
+                    if row[i].value == 'annual_co2_limit':
+                        coords[2] = row[i].coordinate[0]
+                    if row[i].value == 'co2_price':
+                        coords[3] = row[i].coordinate[0]
+            # Get the vertical coordinate of the base scenario and
+            # complete the others with it
+            else:
+                if scen_sheet[f'{coords[0]}{idx+1}'].value == 'Base':
+                    for i in range(len(coords)):
+                        coords[i] = f'{coords[i]}{idx+1}'
+                    break
+        
+        # Apply the changes to the table
+        result = []
+        col_names = ['discount_rate', 'annual_co2_limit', 'co2_price']
+        for i in range(1,4):
+            old_value = scen_sheet[coords[i]].value
+            if old_value != new_values[i-1]:
+                scen_sheet[coords[i]].value = new_values[i-1]
+                result = result + [f'{col_names[i-1]} modified from {old_value} to {new_values[i-1]}']
+        
+        return workbook, result
+    
+    def modify_cs_sheet(self, workbook, new_params):
+        cs_sheet = workbook['ConversionSubProcess']
+        new_params = new_params['values']
+
+        result = []
+        # Iterate over a dict of CSs, that contain a list of lists
+        # {cs_name: [[param_name, new_value, unit], [param_name, new_value, unit]]}
+        for cs_name, value in new_params.items():
+            for param in value:
+                param_name = param[0]
+                new_value = param[1]
+                unit = param[2]
+                
+                # Skip param if the value is empty
+                if not new_value:
+                    continue
+                
+                # Treat the param name if it came with the description from the agent
+                if '-' in param_name:
+                    split_param = param_name.split('-')
+                    param_name = split_param[0].strip()
+                
+                # Initialize indexes as 0
+                param_idx = '0'
+                cs_idx = '0'
+                # Find the right row and column for the combination of cs and param
+                for idx, row in enumerate(cs_sheet.rows):
+                    if idx == 0:
+                        for i in range(len(row)):
+                            if row[i].value == param_name:
+                                param_idx = row[i].coordinate
+                    else:
+                        if f'{row[0].value}@{row[1].value}@{row[2].value}' == cs_name:
+                            cs_idx = row[0].coordinate
+                
+                # If any of the indexes are 0, it failed
+                if param_idx == '0' or cs_idx == '0':
+                    result = result + [f'{param_name} of {cs_name} not found.']
+                # Else, apply the new value
+                else:
+                    old_value = cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value
+                    cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value = new_value
+                    
+                    result = result + [f'{param_name} of {cs_name} modified from {old_value} to {new_value} ({unit})']
+                
+        return workbook, result
 
 class InputGetter(ABC):
     def __init__(self, *args, **kwargs):
@@ -417,7 +523,17 @@ class ESActionsAnalyzer(AgentBase):
             The user will provide you with a USER_INPUT and you should define the line of action to take.
             CONTEXT and ACTION_HISTORY is also there for you to know what you already did in past iterations. \n
             
-            You must output a JSON object with a single key called 'action', this key can contain one
+            Normally the USER_INPUT will be one of the following two types:
+            1. The user asked about a specific scenario layout, for example "what would happend if we reduce
+            the CO2 limit by half?", in this kind of scenario you will modify the model to reach what was asked,
+            run the simulation and compare/plot the results to the user to check what happened in the proposed
+            situation;
+            2. The user asked a more direct question such as "how are CHPs modeled?" or "show me the sankey
+            diagram of the model", in this kind of scenario you will limit your actions to what the user is
+            asking directly; \n
+            
+            You must output a JSON object with a single key called 'action' that represents the next action
+            we need to take in order to reach what the user requested, this key can contain one
             of the following values: ['modify', 'run', 'consult', 'compare', 'plot', 'no_action']. \n
             
             Running a model is expensive, so, unless the user asks you explicitly to run the model in
@@ -488,8 +604,7 @@ class QueryGenerator(AgentBase):
             
             Also, never consider that you know how to to calculations, if there is any calculation in the 
             user request, build a query with it and pass it forward. For any mathematical problem you should use
-            'calculator'. Be sure that you have all the necessary data before routing to this tool. Also, it
-            only solves the following calculations [+,-,*,/,^], it doesn't do anything else. \n
+            'calculator'. Be sure that you have all the necessary data before routing to this tool. \n
             
             You must output a JSON object with two keys, 'tool' and 'next_query'. 'tool' may contain one of the
             following ['web_search', 'calculator', 'user_input', 'no_action'] while 'next_query' is the next
@@ -706,27 +821,29 @@ class ResearchInfoWeb(ResearchAgentBase):
         
         return self.state
 
-# TODO switch the calculator to use eval()
-   
 class Calculator(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
             You are an specialist at identifying the correct operation and operands to build
-            a JSON object as an instruction to a calculator tool. You will identify the correct
-            parameters from the given QUERY. \n
+            a JSON object with the correct equation to be solved, you will get the information of
+            what equation to generate from the given QUERY. \n
             
-            You must output a JSON object with three keys are 'operation', 'op_1' and 'op_2', where
-            'operation' is the operation to be executed, and 'op_1' and 'op_2' are the operands of
-            the specific operation. \n
+            You must output a JSON object with a single key 'equation', that must be in a format
+            solvable with Python, since we'll solve this using the eval() function. You don't need
+            to import anything or prepare the environment in any way, the environment is ready,
+            you just need to build the equation in a format recognizable by python, using python
+            mathematical functions if necessary. \n
             
-            'operation' can only be [+,-,*,/,^], and 'op_1' and 'op_2' must be integers or float. \n
+            NEVER USE IMPORT STATEMENTS, YOU MUST ASSUME THAT ALL NECESSARY LIBRARIES ARE ALREADY
+            IMPORTED, JUST USE THEM. \n
             
-            If you judge that the equation consists of multiple operations, you can check the CONTEXT
-            to verify if the results of some of the operations is already known, and then you may use
-            it to complete your selected operation. If not, simply choose the first operation in the
-            correct order to be executed. The result will be saved and used for the next operation
-            in another iteration. \n
+            If you need information that you don't know to build the equation you may find that
+            in the CONTEXT, so check it for more details on the data. \n
+            
+            If you need intermediate results, you can calculate only them and leave the final
+            result for later, you're part of a iterative tool that may be called as many times
+            as needed to find the final result. \n
             
             Always use double quotes in the JSON object. \n
 
@@ -747,34 +864,17 @@ class Calculator(AgentBase):
         num_steps += 1
         
         llm_output = llm_chain.invoke({"query": query, "context": context})
-        
-        operation = llm_output['operation']
-        op_1 = llm_output['op_1']
-        op_2 = llm_output['op_2']
-
-        if operation == "+":
-            result = op_1 + op_2
-        elif operation == "-":
-            result = op_1 - op_2
-        elif operation == "/":
-            result = op_1 / op_2
-        elif operation == "*":
-            result = op_1 * op_2
-        elif operation == "^":
-            result = op_1 ** op_2
-        else:
-            result = 'ERROR'
-            
-        if result == 'ERROR':
-            str_result = f'The selected operation "{operation}" was not recognized.'
-        else:
-            str_result = f'{op_1} {operation} {op_2} = {result}'
+        equation = llm_output['equation']
         
         if self.debug:
             print("---CALCULATOR TOOL---")
-            print(f'OPERATION: {operation}')
-            print(f'OPERAND 1: {op_1}')
-            print(f'OPERAND 2: {op_2}')
+            print(f'EQUATION: {equation}')
+        
+        result = eval(equation)
+        
+        str_result = f'{equation} = {result}'
+        
+        if self.debug:
             print(f'RESULT: {str_result}\n')
             
         self.state['context'] = context + [str_result]
@@ -854,8 +954,6 @@ class RunModel(AgentBase):
         
         return self.state
 
-# TODO separate the model modification steps into functions of the Helper
-
 class ModifyModel(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return super().get_prompt_template()
@@ -916,7 +1014,7 @@ class ModifyModel(AgentBase):
             """,
             input_variables=["user_input", "scen_params"],
         )
-
+    
     def get_params_general_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
@@ -946,301 +1044,204 @@ class ModifyModel(AgentBase):
             input_variables=["user_input"],
         )
 
-    def get_params_defined_prompt_template(self) -> PromptTemplate:
+    def get_select_cs_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a specialist at identifying the parameters the user wish to modify in the model, as well as the 
-            conversion subprocesses and new values. \n
+            You are a specialist at analizing the USER_INPUT and determining the correct conversion
+            suprocesses that should be modified in a energy system to achieve the user request. \n
             
-            As a context, you will receive two data arrays. PARAMS provides you the name of the parameters
-            available to be selected formated as a combination of the actual parameter name and their description
-            in the format 'name - description'. CONVERSION_SUBPROCESSES provides you the combination of 'cp'
-            (conversion process name), 'cin' (commodity in), 'cout' (commodity out)  in the format 'cp@cin@cout'. \n
+            Your selection should come from the CONVERSION_SUBPROCESSES list provided, you are not
+            allowed to guess names of conversion subprocesses or modify the entries of the list before
+            returning them. You MUST use them as they are in the provided list. \n
             
-            The user's USER_INPUT may contain a request to change one or more combinations of parameter and 
-            conversion subprocess. \n
+            There are two possibilities of ways for you to choose the correct subprocesses:
+            1. The user specified what he wants to modify in the model, in this case you should try
+            to match what was requested and nothing else;
+            2. The user requested a general scenario in which you will be responsible to decide
+            which subprocesses should be modified. \n
             
-            Your goal is to output a JSON object containing a single key 'param_cs_selection', which should contain
-            a list. \n
+            Your output must be a JSON object with a single key 'cs_selection' that will contain a
+            single list with all entries that you selected from CONVERSION_SUBPROCESSES. \n
             
-            The composition of the list is the following: For each combination of conversion subprocess, parameter and
-            value asked by the user there should be a list with four elements in 'params_cs_selection'. Each sub list
-            is composed of ['parameter', ['cs_match'], 'new_value', 'mod_type']. The output structure you should
-            always follow is [[combination], [combination], [combination], ...], and this list that comprehends
-            all of the combinations of parameter, cs, value and modification type is the single element of 'params_cs_selection'.\n
+            Always use double quotes in the JSON object. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            CONVERSION_SUBPROCESSES: {cs_list} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input","cs_list"],
+        )
+        
+    def get_select_params_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at analizing the USER_INPUT and determining the correct parameters
+            that should be modified in a energy system to achieve the user request. \n
             
-            NEVER MAKE UP DATA, USE ONLY DATA FROM THE GIVEN LISTS. NEVER MODIFY THE SELECTED ENTRY, USE IT AS YOU
-            FOUND IT IN THE LIST! THE COMBINATION 'cp@cin@cout' MUST MATCH EXACTLY WITH THE ENTRIES OF THE LIST.
-            YOU CAN NEVER GET cp, cin OR cout FROM DIFFERENT ENTRIES, THEY MUST ALWAYS COME FROM THE SAME. \n
+            Your selection should come from the PARAMETERS dictionary provided, you are not
+            allowed to guess names of parameters or modify the entries of the list before
+            returning them. You MUST use them as they are in the provided list. \n
             
-            For 'parameter', the value is a string and you must always output either one selected param or 'NOT_FOUND'
-            if you couldn't match any of the available ones (never output more than one per combination). \n
+            The PARAMETERS dictionary shows for each conversion subprocess the available parameters,
+            you should select from among the ones available for that specific subprocess. The format
+            in which each parameter is shown is 'param_name - description', you must output only the
+            param_name, never the description. \n
             
-            For 'cs_match' you should always output a list with the conversion suprocesses matches (in format cp@cin@cout).
-            If there is a sigle matching conversion subprocess, then the list will have a single element but will still 
-            be a list. And if you can't match any conversion subprocess, then you must output an empty list. Important that 
-            there is a difference between asking for a generic conversion process with more than a single conversion 
-            subprocess related to it (situation in which you should match all options to the combination) and asking to
-            change a set of conversion subprocesses with the same conversion process name (situation in which each of
-            the conversion subprocesses should be given their own combinations) \n
+            There are two possibilities of ways for you to choose the correct parameters:
+            1. The user specified what he wants to modify in the model, in this case you should try
+            to match what was requested and nothing else;
+            2. The user requested a general scenario in which you will be responsible to decide
+            which parameters should be modified. \n
             
-            For the 'new_value' you have four possibilities:
-            1. The user specified a single value for the combination. In this case you put the value as a numeric value
-            in the combination list;
-            2. The user specified a value containing [] in it. In this case you should use the exact same value as a string.
-            DON'T CHANGE ANYTHING IN THE VALUE. For example, the user inputs [2020 10; 2030 5; 2040 2], you should output
-            exactly [2020 10; 2030 5; 2040 2] as a string for the value of this combination;
-            3. There is a indirect reference to the desired value, in this case the value will probably be in the provided
-            CONTEXT, check there before going to the fourth possibility;
-            4. If there is no value to be found for a specific combination, simply output 'NOT_PROVIDED' for that one,
-            NEVER MAKE UP VALUES. 'NOT_PROVIDED' is the only possible text that you can output as a value.\n
+            Your output must be a JSON object with a single key 'param_selection' that will contain a
+            single dictionary where the keys are each of the conversion subprocesses and the values
+            are the list of selected parameters for each of them. \n
             
-            For the 'mod_type' you can use two different types, 'fixed' or 'multiplier'. 'fixed' tells the tool
-            that you want the value to be exactly what you specified, 'multiplier' indicates that you want the
-            current value to be multiplied by the value you defined. \n
+            Always use double quotes in the JSON object. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            PARAMETERS: {param_list} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input","param_list"],
+        )
+
+    def get_new_values_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at defining new values for model parameters based on the USER_INPUT. \n
+            
+            You have access to all values to be modified in CURRENT_VALUES, they are organized as a
+            dictionary, where each key represents a conversion subprocess and the value of each key
+            is a list of lists containing all of the current values. Each sublist of this list is
+            organized as follows: [param_name, current_value, unit]. \n
+            
+            Your job is to understand the USER_INPUT to modify the 'current_value' in this structure.
+            You will output a JSON object that contains two keys, 'success' and 'values', where 'success'
+            should receive a boolean (always lower case) and 'values' should receive the same structure
+            as CURRENT_VALUES but with 'current_value' updated for the new value in all entries. \n
+            
+            You have some options of how to update the value based on USER_INPUT:
+            1. The user specified a value, in this case you need to use the exact values that were asked
+            by the user;
+            2. The user didn't specify a value but gave some kind of idea of the modification, for example
+            asked you to double the value, to reduce by 30%, to remove (in this case the value should go to 0),
+            in this case you need to figure out by how much the value will be modified;
+            3. The user didn't specify a value but asked for some indirect value related to other piece of
+            information, in this case you can check CONTEXT for the necessary information;
+            4. In case you couldn't categorize the request as any of the past 3 cases, you should mark
+            'success' as false and 'values' as an empty dict. \n
+            
+            There are two types of values that you can receive, numbers or lists. If the value is a number
+            it's simple, the number represents the value of that parameter, however, if you receive a list
+            (which will be in form of a string and should also be outputed as a string) it represents the
+            variation of the parameter by year, for example '[2015 10; 2030 20; 2050 40]'. You may modify
+            the available years and the values, as long as you keep the format and the output as string. \n
+            
+            If you need to output any value as 'nan', 'null', empty or similars, you should instead use
+            and empty string as the output for that value. \n
             
             Always use double quotes in the JSON object. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
             CONTEXT: {context} \n
-            PARAMS: {params} \n
-            CONVERSION_SUBPROCESSES: {CSs} \n
+            CURRENT_VALUES: {current_values} \n
             Answer:
             <|eot_id|>
             <|start_header_id|>assistant<|end_header_id|>
             """,
-            input_variables=["user_input","context","params","CSs"],
+            input_variables=["user_input","context","current_values"],
         )
 
-    def get_params_undefined_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a specialist at deciding the necessary modifications in the model based on the user's USER_INPUT. \n
-            
-            As a context, you will receive two data arrays. PARAMS provides you the name of the parameters
-            available to be selected formated as a combination of the actual parameter name and their description
-            in the format 'name - description'. CONVERSION_SUBPROCESSES provides you the combination of 'cp'
-            (conversion process name), 'cin' (commodity in), 'cout' (commodity out)  in the format 'cp@cin@cout'. \n
-            
-            Your goal is to output a JSON object containing a single key 'param_cs_selection', which should contain
-            a list. This list contains each combination of conversion subprocess, parameters, values and modification
-            type that you judge necessary to fulfill the user's scenario. \n
-            
-            For each combination of conversion subprocess, parameter, value and modification type that you define as
-            necessary to change there should be a list with four elements in 'params_cs_selection'. Each of the combination
-            lists is composed of [['parameters'], 'cs', ['new_values'], 'mod_type']. It MUST be in this order, you can't
-            change it by any means, since it will be identified by it's order later in the pipeline. The output structure you
-            should always follow is [[combination], [combination], [combination], ...], and this list that comprehends
-            all of the combinations of parameter, cs, value and modification type is the single element of 'params_cs_selection'.\n
-            
-            NEVER MAKE UP DATA, USE ONLY DATA FROM THE GIVEN LISTS. NEVER MODIFY THE SELECTED ENTRY, USE IT AS YOU
-            FOUND IT IN THE LIST! FOR THE CONVERSION SUBPROCESSES YOU MUST USE THE ENTIRE CS NAME, IN THE FORMAT (CP@CIN@COUT),
-            NEVER USE ONLY A PART OF IT. \n
-            
-            You must analyze the user's scenario request and decide all conversion subprocesses (cp@cin@cout) that should be modified,
-            as well as the parameters necessary to be modified on each of the subprocesses. Each element of 'params_cs_selection'
-            should contain a list with the parameters to be modified, the selected conversion subprocess to be modified 
-            and a list with all the new values. 'parameters' and 'new_values' should have the same size. \n
-            
-            You have only two possibilities for the new values:
-            1. You want to change something to 0, in this case you output a numerical 0 in the value;
-            2. In any other case you should use percentual changes through decimal numbers, these decimals will be multiplied
-            with the current value of the parameter.
-            
-            For the 'mod_type' you can use two different types, 'fixed' or 'multiplier'. 'fixed' tells the tool
-            that you want the value to be exactly what you specified, 'multiplier' indicates that you want the
-            current value to be multiplied by the value you defined. \n
-            
-            Always use double quotes in the JSON object. \n
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            USER_INPUT: {user_input} \n
-            CONTEXT: {context} \n
-            PARAMS: {params} \n
-            CONVERSION_SUBPROCESSES: {CSs} \n
-            Answer:
-            <|eot_id|>
-            <|start_header_id|>assistant<|end_header_id|>
-            """,
-            input_variables=["user_input","context","params","CSs"],
-        )
-    
     def execute(self) -> GraphState:
         if self.debug:
             print('---MODEL MODIFIER---')
-            
+        
+        helper = HelperFunctions()
+        
+        # Define prompts
         sheet_selector_prompt = self.get_sheet_selector_prompt_template()
         scenario_param_prompt = self.get_scenario_param_prompt_template()
         params_general_prompt = self.get_params_general_prompt_template()
-        params_defined_prompt = self.get_params_defined_prompt_template()
-        params_undefined_prompt = self.get_params_undefined_prompt_template()
-        
+        select_cs_prompt = self.get_select_cs_prompt_template()
+        select_params_prompt = self.get_select_params_prompt_template()
+        new_values_prompt = self.get_new_values_prompt_template()
+
+        # Define chains
         sheet_selector_chain = sheet_selector_prompt | self.json_model | JsonOutputParser()
         scenario_param_chain = scenario_param_prompt | self.json_model | JsonOutputParser()
         params_general_chain = params_general_prompt | self.json_model | JsonOutputParser()
-        params_defined_chain = params_defined_prompt | self.json_model | JsonOutputParser()
-        params_undefined_chain = params_undefined_prompt | self.json_model | JsonOutputParser()
-    
+        select_cs_chain = select_cs_prompt | self.json_model |JsonOutputParser()
+        select_params_chain = select_params_prompt | self.json_model |JsonOutputParser()
+        new_values_chain = new_values_prompt | self.json_model | JsonOutputParser()
+        
+        # Define inputs from state
         user_input = self.state['consolidated_input']
         context = self.state['context']
         action_history = self.state['action_history']
         scen_modded = self.state['scen_modded']
         num_steps = self.state['num_steps']
         num_steps += 1
-        
-        # TODO change to multipliers
-        
-        helper = HelperFunctions()
 
+        # Get list of params, conversion subprocesses and dict with the scenario params
         params, CSs = helper.get_params_and_cs_list(self.base_model)
         scen_params = helper.get_scenario_params(self.base_model)
         
-        llm_output = sheet_selector_chain.invoke({"user_input": user_input,
-                                                  "scen_modded": scen_modded})
-        sheet = llm_output['sheet']
-
-        if llm_output['sheet'] == 'scenario':
+        # Selects the sheet that must be modified (scenario or cs)
+        sheet_selection = sheet_selector_chain.invoke({"user_input": user_input,
+                                                       "scen_modded": scen_modded})
+        sheet = sheet_selection['sheet']
+        
+        # Load workbook for modifications
+        workbook = load_workbook(filename=self.base_model)
+        
+        if sheet == 'scenario':
+            # Modify the scenario parameters
             new_params = scenario_param_chain.invoke({"user_input": user_input,
                                                       "scen_params": scen_params})
+            
+            workbook, result = helper.modify_scenario_sheet(workbook, new_params)
         else:
-            llm_output = params_general_chain.invoke({"user_input": user_input})
+            # Defines the type of parametrization (defined or undefined)
+            parametrization_type = params_general_chain.invoke({"user_input": user_input})
+            parametrization_type = parametrization_type['parametrization_type']
 
-            if llm_output['parametrization_type'] == 'defined':
-                new_params = params_defined_chain.invoke({"user_input": user_input,
-                                                          "context": context,
-                                                          "params": params,
-                                                          "CSs": CSs})
+            # Selects the conversion subprocesses that match the user input
+            cs_selection = select_cs_chain.invoke({"user_input": user_input, "cs_list": CSs})
+            cs_selection = cs_selection['cs_selection']
+
+            if parametrization_type == 'defined':
+                # Set the available parameters as being all of them for each conversion subprocess
+                available_parameters = {cs: params for cs in cs_selection}
             else:
-                new_params = params_undefined_chain.invoke({"user_input": user_input,
-                                                            "context": context,
-                                                            "params": params,
-                                                            "CSs": CSs})
-        
-        workbook = load_workbook(filename=self.base_model)
+                # Set the available parameters as being only the ones that are already filled for each cs
+                available_parameters = helper.get_populated_params_and_cs_list(self.base_model, cs_selection)
 
-        if sheet == 'scenario':
-            # The scenario sheet should be modified
-            scen_sheet = workbook['Scenario']
-            new_params = new_params['new_values']
-            coords = ['','','','']
+            # Selects the matching parameter from the set of available ones
+            param_selection = select_params_chain.invoke({"user_input": user_input, "param_list": available_parameters})
+            param_selection = param_selection['param_selection']
+
+            # Gets the current values for the selected pairs of cs and parameter
+            current_values = helper.get_values(self.base_model, param_selection)
+
+            # Feed the current data to the model, it will output the updated values in the same format
+            new_params = new_values_chain.invoke({"user_input": user_input, "context": context, "current_values": current_values})
             
-            for idx, row in enumerate(scen_sheet.rows):
-                if idx == 0:
-                    for i in range(len(row)):
-                        if row[i].value == 'scenario_name':
-                            coords[0] = row[i].coordinate[0]
-                        if row[i].value == 'discount_rate':
-                            coords[1] = row[i].coordinate[0]
-                        if row[i].value == 'annual_co2_limit':
-                            coords[2] = row[i].coordinate[0]
-                        if row[i].value == 'co2_price':
-                            coords[3] = row[i].coordinate[0]
-                else:
-                    if scen_sheet[f'{coords[0]}{idx+1}'].value == 'Base':
-                        for i in range(len(coords)):
-                            coords[i] = f'{coords[i]}{idx+1}'
-                        break
-            
-            result = []
-            col_names = ['discount_rate', 'annual_co2_limit', 'co2_price']
-            for i in range(1,4):
-                old_value = scen_sheet[coords[i]].value
-                if old_value != new_params[i-1]:
-                    scen_sheet[coords[i]].value = new_params[i-1]
-                    result = result + [f'{col_names[i-1]} modified from {old_value} to {new_params[i-1]}']
-                    
-        else:
-            # The conversion subprocess sheet should be modified
-            cs_sheet = workbook['ConversionSubProcess']
-            
-            new_params = new_params['param_cs_selection']
-            params_list = []
-            
-            for i in range(len(new_params)):
-                parameter = new_params[i][0]
-                if ' - ' in parameter:
-                    parameter = parameter.split(' - ')[0]
-                cs = new_params[i][1]
-                new_value = new_params[i][2]
-                mod_type = new_params[i][3]
-                
-                # Defined param format: [parameter, [cs_list], new_value]
-                if type(cs) == list and len(cs) > 1:
-                    data = []
-                    for j in range(len(cs)):
-                        elements = cs[j].split('@')
-                        data.append([j+1,elements[0],elements[1],elements[2]])
-                        table = tabulate(data, headers=["Index", "CP", "CIN", "COUT"])
-                    
-                    print('More than one match were found for one of the selected conversion subprocesses.')
-                    print(table)
-                    cs_select = int(input(f'Input the number of the correct CS (0 if none, and {len(cs)+1} if all):\n')) - 1
-                    
-                    if cs_select == len(cs):
-                        for j in range(len(cs)):
-                            params_list = params_list + [[parameter, cs[j], new_value, mod_type]]
-                    elif cs_select >= 0:
-                        params_list = params_list + [[parameter, cs[cs_select], new_value, mod_type]]
-                elif type(cs) == list:
-                    params_list = params_list + [[parameter, cs[0], new_value, mod_type]]
-                    
-                # Undefined param format: [[param_list], cs, [new_value_list]]
-                if type(parameter) == list and len(parameter) > 1:
-                    for i in range(len(parameter)):
-                        params_list = params_list + [[parameter[i], cs, new_value[i], mod_type]]
-                elif type(parameter) == list:
-                    params_list = params_list + [[parameter[0], cs, new_value[0], mod_type]]
-            
-            #open workbook
-            result = []
-            for i in range(len(params_list)):
-                parameter = params_list[i][0]
-                if ' - ' in parameter:
-                    parameter = parameter.split(' - ')[0]
-                cs = params_list[i][1]
-                split_cs = cs.split('@')
-                new_value = params_list[i][2]
-                mod_type = params_list[i][3]
-                
-                param_idx = '0'
-                cs_idx = '0'
-                
-                full_cs_found = False
-                cs_sub = ''
-                for idx, row in enumerate(cs_sheet.rows):
-                    if idx == 0:
-                        for i in range(len(row)):
-                            if row[i].value == parameter:
-                                param_idx = row[i].coordinate
-                    else:
-                        if f'{row[0].value}@{row[1].value}@{row[2].value}' == cs:
-                            cs_idx = row[0].coordinate
-                            full_cs_found = True
-                        elif f'{row[0].value}@{split_cs[1]}@{row[2].value}' == cs and not full_cs_found:
-                            cs_idx = row[0].coordinate
-                            cs_sub = f'{row[0].value}@{split_cs[1]}@{row[2].value}'
-                if param_idx == '0' or cs_idx == '0':
-                    result = result + [f'{parameter} of {cs} not found.']
-                else:
-                    if not full_cs_found and len(cs_sub) > 0:
-                        cs = cs_sub
-                    old_value = cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value
-                    if mod_type == 'multiplier':
-                        if type(old_value) and '[' in old_value:
-                            full_new_value = '['
-                            split_value = old_value[1:-1].split(';')
-                            for y in split_value:
-                                year, value = y.split(' ')
-                                full_new_value = f'{full_new_value}{year} {"%.2f" % (float(value)*new_value)};'
-                            new_value = full_new_value[:-1] + ']'
-                        else:
-                            new_value = old_value * new_value
-                    cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value = new_value
-                    
-                    result = result + [f'{parameter} of {cs} modified from {old_value} to {new_value}']
+            # IF the agent indicates that the modification was successfull, then apply them to the sheet
+            if new_params['success']:
+                workbook, result = helper.modify_cs_sheet(workbook, new_params)
+            else:
+                result = ['Failed to generate the correct modified set of parameters.']
                         
         try:
+            # Try to save, if it saves and the scenario was modified, mark it as modified
             workbook.save(filename=self.mod_model)
             if sheet == 'scenario':
                 scen_modded = True
@@ -1309,6 +1310,7 @@ class InfoTypeIdentifier(AgentBase):
         return self.state
 
 # TODO check the answer analyzer prompt
+# TODO create chain to decide whether to search information on the paper or on the CESM documentation
 
 class ResearchInfoRAG(ResearchAgentBase):
     def get_prompt_template(self) -> PromptTemplate:
@@ -1850,6 +1852,16 @@ class OutputGenerator(AgentBase):
             does not answer the user completely, ask the user for the necessary
             information if possible. \n
             
+            Since you are part of a model analyzing tool you will probably receive
+            information about model modifications, model runs, model results, etc.
+            If the user is talking about manipulations in the model you should 
+            restrain your answer to what was actually done regarding the model
+            (information that you'll find in CONTEXT and ACTION_HISTORY), never
+            make up modifications or indicate plots for yourself. Other nodes
+            already manipulated the model and showed plots to the user, you should
+            just forward this information to the user. For listing information
+            about parameters you should show a topic list to the user if possible. \n
+            
             CHAT_HISTORY can also be used to gather context and information about
             past messages exchanged between you and the user. \n
             
@@ -1904,352 +1916,5 @@ class OutputGenerator(AgentBase):
         self.state['scen_modded'] = False
         self.state['num_steps'] = num_steps
         self.state['final_answer'] = llm_output
-        
-        return self.state
-    
-# Outdated
-
-class ESToolSelector(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are an expert at reading the user QUERY and and the  routing it to the correct tool in our
-            modelling system. \n
-
-            Use the following criteria to decide how to route the query to one of our available tools: \n\n
-            
-            If the user asks for any modification on any particular model, select 'model_modifier'. \n
-            
-            If the user asks to plot anything, select 'data_plotter'. \n
-            
-            If the user asks to run a simulation of any particular model, select 'sim_runner'. \n
-
-            You must output a JSON object with two keys:
-            'selected_tool' containing one of the following values ['model_modificator', 'data_plotter', 'sim_runner'];
-            'selected_model' containing the name of the model to be manipulated. \n
-            
-            If the user didn't provide a model name, fill the key 'selected_model' with 'NO_MODEL'. \n
-            
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUERY : {query} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["query"],
-        )
-        
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        
-        query = self.state['user_input']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-
-        router = llm_chain.invoke({"query": query})
-        router_decision = router['selected_tool']
-        identified_model = router['selected_model']
-        
-        if self.debug:
-            print("---ENERGY SYSTEM TOOL SELECTION---")
-            print(f'QUERY: {query}')
-            print(f'SELECTED TOOL: {router_decision}')
-            print(f'IDENTIFIED MODEL: {identified_model}\n')
-            
-        self.state['selected_tool'] = router_decision
-        self.state['identified_model'] = identified_model
-        self.state['num_steps'] = num_steps
-        
-        return self.state
-
-class ParamsIdentifier(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a specialist at identifying the correct conversion subprocess and the correct parameter
-            selected by the user in his QUERY. \n
-            
-            As a context, you will receive two data arrays. PARAMS provides you the name of the parameters
-            available to be selected. CONVERSION_SUBPROCESSES provides you the combination of 'cp' (conversion process name),
-            'cin' (commodity in), 'cout' (commodity out) and 'scen' (scenario) in the format 'cp@cin@cout@scen'.\n
-            
-            Your goal is to output a JSON object containing three keys: 'param', 'value', 'cs_list'.
-            'param' must receive the name of the selected parameter;
-            'value' is the new value selected by the user;
-            'cs_list' is a list with all matching conversion subprocesses (idealy only one if possible); \n
-            
-            NEVER MAKE UP DATA, USE ONLY DATA FROM THE GIVEN LIST. NEVER MODIFY THE SELECTED ENTRY, USE IT AS YOU
-            FOUND IT IN THE LIST! \n
-            
-            If you can't find any match to the 'cp' name, leave the field 'cs_list' empty. If you can't find any match
-            to the 'param' name, fill the field param with 'NOT_FOUND'. \n
-            
-            For the value required by the user, if the value is not directly stated in the QUERY, it will be
-            available in the CONTEXT, use the data found there, never try to guess the desired value. If you can't find
-            the value in the context leave the field 'value' empty. \n
-            
-            The field 'value' only accepts numeric input, unless the input given by the user contains [], in this
-            case you should output it as a string. \n
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUERY: {query} \n
-            CONTEXT: {context} \n
-            PARAMS: {params} \n
-            CONVERSION_SUBPROCESSES: {CSs} \n
-            Answer:
-            <|eot_id|>
-            <|start_header_id|>assistant<|end_header_id|>
-            """,
-            input_variables=["query","context","params","CSs"],
-        )
-    
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        
-        if self.debug:
-            print("---PARAM SELECTOR---")
-            
-        query = self.state['initial_query']
-        context = self.state['context']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        self.state['num_steps'] = num_steps
-
-        tmap = pd.ExcelFile('Models/DEModel.xlsx')
-        df = pd.read_excel(tmap,"ConversionSubProcess")
-
-        conversion_processes = np.asarray(df.iloc[:,0].dropna())
-        mask = np.where(conversion_processes != 'DEBUG')
-        conversion_processes = conversion_processes[mask]
-        parameters = np.asarray(df.columns[4:])
-
-        cs = np.asarray(df.iloc[:,0:4].dropna())
-        mask = np.where(cs[:,0] != 'DEBUG')
-        cs = cs[mask]
-        conversion_subprocesses = np.empty((len(cs),1),dtype=object)
-
-        for i in range(len(cs)):
-            conversion_subprocesses[i] = f'{cs[i,0]}@{cs[i,1]}@{cs[i,2]}@{cs[i,3]}'
-
-        output = llm_chain.invoke({"query": query, "context": context, "params": parameters, "CSs": conversion_subprocesses})
-        
-        if self.debug:
-            print('---CONFIRM SELECTION---')
-        # TODO make this work in the chat UI
-        cs_list = output['cs_list']
-        param = output['param']
-        new_value = output['value']
-        data = []
-        for i in range(len(cs_list)):
-            elements = cs_list[i].split('@')
-            data.append([i+1,elements[0],elements[1],elements[2],elements[3]])
-            table = tabulate(data, headers=["Index", "CP", "CIN", "COUT", "Scen"])
-        
-        if len(data) == 0:
-            print('No matching conversion subprocess was found.')
-            cs_confirm = 'N'
-        elif len(data) == 1:
-            print('The following matching conversion subprocess was found:\n')
-            print(table)
-            cs_confirm = input('Is that correct? (Y or N)\n')
-            cs_select = 0 if cs_confirm == 'Y' else 'NONE'
-        else:
-            print('The following conversion subprocesses were found:\n')
-            print(table)
-            cs_select = int(input('Input the number of the correct CS (or 0 if it\'s none of these):\n')) - 1
-            cs_confirm = 'Y' if cs_select != -1 else 'N'
-        
-        if cs_confirm == 'N':
-            print('FINAL ANSWER: No matching selection.')
-            self.state['cs'] = 'NO_MATCH'
-            self.state['selection_is_valid'] = False
-            self.state['parameter'] = 'NO_MATCH'
-            return self.state
-            
-        if param in parameters:
-            param_confirm = input(f'You want to modify the parameter {param}, is that correct? (Y or N)\n')
-        else:
-            print('No matching parameter was found.')
-            param_confirm = 'N'
-            
-        if param_confirm == 'N':
-            print('FINAL ANSWER: No matching selection.')
-            self.state['cs'] = cs_list[cs_select]
-            self.state['selection_is_valid'] = False
-            self.state['parameter'] = 'NO_MATCH'
-        else:
-            print(f'FINAL ANSWER: CS: {cs_list[cs_select]}; Param: {param}')
-            self.state['cs'] = cs_list[cs_select]
-            self.state['new_value'] = new_value
-            self.state['selection_is_valid'] = True
-            self.state['parameter'] = param
-        
-        return self.state
-    
-class ScenarioIdentifier(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a specialist at identifying the correct scenario choosen by the user
-            in his QUERY to have the simulation run. \n
-            
-            As a context, you will receive a data array called SCENARIOS, which contains
-            all of the scenarios that are available to be simulated. \n
-            
-            Your goal is to output a JSON object containing one key called 'scenario_name' that contains
-            the name of the scenario selected by the user. \n
-            
-            NEVER MAKE UP DATA, USE ONLY DATA FROM THE GIVEN LIST. If you can't find any match to the asked scenario,
-            simply fill the key 'scenario_name' with 'NOT_FOUND'. \n
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            QUERY: {query} \n
-            SCENARIOS: {scenarios} \n
-            Answer:
-            <|eot_id|>
-            <|start_header_id|>assistant<|end_header_id|>
-            """,
-            input_variables=["query","scenarios"],
-        )
-        
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        
-        if self.debug:
-            print('---SCENARIO SELECTOR---')
-        
-        query = self.state['initial_query']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        self.state['num_steps'] = num_steps
-        
-        tmap = pd.ExcelFile('models/DEModel.xlsx')
-        df = pd.read_excel(tmap,"Scenario")
-        scenarios = np.asarray(df.iloc[:,0].dropna())
-        
-        output = llm_chain.invoke({'query': query, 'scenarios': scenarios})
-        identified_scenario = output['scenario_name']
-        print(f'IDENTIFIED SCENARIO: {identified_scenario}')
-        #TODO make this work in the chat
-        if identified_scenario == 'NOT_FOUND' or not(identified_scenario in scenarios):
-            print('No valid scenario was identified in the request, here are the available scenarios:\n')
-            for i in range(len(scenarios)):
-                print(f'{i+1} - {scenarios[i]}')
-            selection = int(input('Select the desired scenario to be run (select 0 if none of these):\n'))-1
-            if selection != -1:
-                identified_scenario = scenarios[selection]
-            else:
-                identified_scenario = 'NOT_FOUND'
-        # if identified_scenario == 'NOT_FOUND' or not(identified_scenario in scenarios):
-        #     kwargs = {
-        #         'label': 'No valid scenario was identified in the request, here are the available scenarios:',
-        #         'buttons': scenarios,
-        #         'app': self.app,
-        #         'callback': self.confirm_selection
-        #     }
-        #     input_getter = InputGetter(self.app, **kwargs)
-        #     if not(self.selected_value in scenarios):
-        #         identified_scenario = self.selected_value
-        #     else:
-        #         identified_scenario = 'NOT_FOUND'
-        
-        if identified_scenario == 'NOT_FOUND':
-            message = 'No valid scenario was found'
-            valid = False
-        else:
-            message = f'Selected scenario for simulation: {identified_scenario}'
-            valid = True
-            
-        print(message)
-        
-        self.state['scenario'] = identified_scenario
-        self.state['selection_is_valid'] = valid
-        self.state['final_answer'] = message
-
-        return self.state
-    
-class PlotIdentifier(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-        template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-        You are a specialist at identifying from the user's QUERY the correct plot type requested by
-        the user and the desired variable the user wants to plot. \n
-        
-        As a context, you will receive two data arrays:
-        PLOT_TYPES will provide you information about the available plot types;
-        VARIABLES will provide you information about the available variables to be plotted. \n
-        
-        Your goal is to output a JSON OBJECT containing only two keys 'plot_type' and 'variable'.
-        'plot_type' will receive the selected plot type from PLOT_TYPES, if you can't find the plot
-        requested by the user in the list, fill the key with 'NOT_FOUND';
-        'variable' will receive the selected variable from VARIABLES, if you can't find the
-        variable requested by the user fill the key with 'NOT_FOUND'. \n
-        
-        NEVER MAKE UP DATA, USE ONLY DATA FROM THE GIVEN LISTS. \n
-
-        <|eot_id|><|start_header_id|>user<|end_header_id|>
-        QUERY: {query} \n
-        PLOT_TYPES: {plot_types} \n
-        VARIABLES: {variables} \n
-        Answer:
-        <|eot_id|>
-        <|start_header_id|>assistant<|end_header_id|>
-        """,
-        input_variables=["query","plot_types","variables"],
-    )
-        
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        
-        if self.debug:
-            print('---PLOT SELECTOR---')
-            
-        num_steps = self.state['num_steps']
-        num_steps += 1
-        query = self.state['initial_query']
-        
-        plot_types = ['Bar', 'TimeSeries', 'Sankey', 'SingleValue']
-        variables = ['TOTEX','OPEX','CAPEX','total_annual_co2_emission','cap_active','cap_new','cap_res','pin','pout']
-        
-        output = llm_chain.invoke({"query": query, "plot_types": plot_types, "variables": variables})
-        identified_plot = output['plot_type']
-        identified_variable = output['variable']
-        print(f'IDENTIFIED PLOT: {identified_plot}\nIDENTIFIED VARIABLE: {identified_variable}')
-        
-        if identified_plot == 'NOT_FOUND' or not(identified_plot in plot_types):
-            print('No valid plot type was identified in the request, here are the available plot types:\n')
-            for i in range(len(plot_types)):
-                print(f'{i+1} - {plot_types[i]}')
-            selection = int(input('Select the desired type of plot (select 0 if none of these):\n'))-1
-            if selection != -1:
-                identified_plot = plot_types[selection]
-            else:
-                identified_plot = 'NOT_FOUND'
-        # TODO
-        if identified_variable == 'NOT_FOUND' or not(identified_variable in variables):
-            print('No valid variable was identified in the request, here are the available variables:\n')
-            for i in range(len(variables)):
-                print(f'{i+1} - {variables[i]}')
-            selection = int(input('Select the desired variable to be plotted (select 0 if none of these):\n'))-1
-            if selection != -1:
-                identified_variable = plot_types[variables]
-            else:
-                identified_variable = 'NOT_FOUND'
-        
-        if identified_plot == 'NOT_FOUND' or identified_variable == 'NOT_FOUND':
-            message = 'No valid plot was identified'
-            valid = False
-        else:
-            message = f'Selected plot: {identified_plot} for {identified_variable}'
-            valid = True
-        
-        print(message)
-        
-        self.state['num_steps'] = num_steps
-        self.state['plot_type'] = identified_plot
-        self.state['variable'] = identified_variable
-        self.state['selection_is_valid'] = valid
-        self.state['final_answer'] = message
         
         return self.state
