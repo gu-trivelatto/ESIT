@@ -12,6 +12,31 @@ class BaseRouter(ABC):
     def execute(self) -> str:
         pass
         
+class BypassRouter(BaseRouter):
+    def execute(self) -> str:
+        """
+        Route either to the tool or to the output.
+        Args:
+            state (dict): The current graph state
+        Returns:
+            str: Next node to call
+        """
+        is_conversation = self.state['is_conversation']
+        
+        message = "---BYPASS ROUTER---\nROUTE TO: "
+        
+        if is_conversation:
+            message += "Skip to output\n"
+            selection = "output"
+        else:
+            message += "Use tool\n"
+            selection = "tool"
+
+        if self.debug:
+            self.helper.save_debug(message)
+            
+        return selection
+
 class TypeRouter(BaseRouter):
     def execute(self) -> str:
         """

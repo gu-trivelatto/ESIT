@@ -36,7 +36,6 @@ class FinalAnswerPrinter(PrinterBase):
         history = self.state['history']
         history.append({"role": "assistant", "content": self.state['final_answer']})
         
-        with open("chat_history.pkl", "wb") as f:
-            pickle.dump(history, f)
+        self.helper.save_history(history)
         
         return self.state

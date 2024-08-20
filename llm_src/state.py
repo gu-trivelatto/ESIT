@@ -12,6 +12,7 @@ class GraphState(TypedDict):
         history: a list containing the history of user inputs and model outputs
         user_input: user input provided to the pipeline
         consolidated_input: user input + necessary context if it references past iterations
+        is_conversation: bypass to the output if the user is simply having a chat with the model
         input_type: 'mixed', 'general' or 'energy_system', defines the branch to be run
         query_history: list of queries already fed to the 'general' tools
         next_query: next query generated for the 'general' tools, contains the query and the selected tool
@@ -28,16 +29,16 @@ class GraphState(TypedDict):
     history: List[dict]
     user_input: str
     consolidated_input: str
+    is_conversation: bool
     input_type: str
     query_history: List[str]
     next_query: dict
     context: List[str]
     is_data_complete: bool
-    action_history: List[str]
+    action_history: dict
     next_action: str
     retrieval_type: str
     model_info: List[str]
-    scen_modded: bool
     final_answer: str
     
     @staticmethod
@@ -46,6 +47,7 @@ class GraphState(TypedDict):
             num_steps=0,
             history=history,
             user_input=user_input,
+            is_conversation=False,
             consolidated_input="",
             input_type="",
             selected_tool="",
@@ -53,11 +55,10 @@ class GraphState(TypedDict):
             next_query={},
             context=[],
             is_data_complete=False,
-            action_history=[],
+            action_history={'modify': 'no', 'run': 'no', 'compare': 'no', 'plot': 'no', 'consult': 'no'},
             next_action="",
             retrieval_type="",
             model_info=[],
-            scen_modded=False,
             final_answer=""
         )
     

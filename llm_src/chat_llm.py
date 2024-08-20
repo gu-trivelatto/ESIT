@@ -19,7 +19,7 @@ from llama_index.core import Settings
 from llama_index.core import VectorStoreIndex, StorageContext
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 
-with open('secrets.yml', 'r') as f:
+with open('metadata/secrets.yml', 'r') as f:
     secrets = yaml.load(f, Loader=yaml.SafeLoader)
 
 os.environ["GROQ_API_KEY"] = secrets['groq'][0]
@@ -33,6 +33,14 @@ json_model = ChatGroq(
 ht_model = ChatGroq(
             model="llama-3.1-70b-versatile",
         )
+ht_json_model = ChatGroq(
+            model="llama-3.1-70b-versatile",
+        ).bind(response_format={"type": "json_object"})
+
+llm_models = {'chat_model': chat_model,
+              'json_model': json_model,
+              'ht_model': ht_model,
+              'ht_json_model': ht_json_model}
 
 class RAGRetriever(ABC):
     def __init__(self):
@@ -87,66 +95,69 @@ web_tool = WebSearchTool()
 
 class GraphBuilder(ABC):
     def __init__(self, model_path, app, debug):
-        self.base_model = f'{model_path}/DEModel.xlsx'
-        self.mod_model = f'{model_path}/DEModel_modified.xlsx'
+        self.es_models = {'base_model': f'{model_path}/DEModel.xlsx',
+                          'mod_model': f'{model_path}/DEModel_modified.xlsx'}
         self.debug = debug
         self.app = app
     
     # Agents (Nodes of the Graph)
     
     def date_getter(self, state: GraphState) -> GraphState:
-        return agents.DateGetter(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.DateGetter(llm_models, self.es_models, state, self.app, self.debug).execute()
+    
+    def tool_bypasser(self, state: GraphState) -> GraphState:
+        return agents.ToolBypasser(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def type_identifier(self, state: GraphState) -> GraphState:
-        return agents.TypeIdentifier(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.TypeIdentifier(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def mixed(self, state: GraphState) -> GraphState:
-        return agents.Mixed(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.Mixed(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def query_generator(self, state: GraphState) -> GraphState:
-        return agents.QueryGenerator(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.QueryGenerator(llm_models, self.es_models, state, self.app, self.debug).execute()
 
     def research_info_web(self, state: GraphState) -> GraphState:
-        return agents.ResearchInfoWeb(chat_model, json_model, ht_model, retriever, web_tool, state, self.app, self.debug).execute()
+        return agents.ResearchInfoWeb(llm_models, retriever, web_tool, state, self.app, self.debug).execute()
 
     def calculator(self, state: GraphState) -> GraphState:
-        return agents.Calculator(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.Calculator(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def context_analyzer(self, state: GraphState) -> GraphState:
-        return agents.ContextAnalyzer(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.ContextAnalyzer(llm_models, self.es_models, state, self.app, self.debug).execute()
     
-    def es_actions_analyzer(self, state: GraphState) -> GraphState:
-        return agents.ESActionsAnalyzer(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+    def es_necessary_actions(self, state: GraphState) -> GraphState:
+        return agents.ESNecessaryActionsSelector(llm_models, self.es_models, state, self.app, self.debug).execute()
+    
+    def es_action_selector(self, state: GraphState) -> GraphState:
+        return agents.ESActionSelector(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def input_consolidator(self, state: GraphState) -> GraphState:
-        return agents.InputConsolidator(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.InputConsolidator(llm_models, self.es_models, state, self.app, self.debug).execute()
 
     def run_model(self, state: GraphState) -> GraphState:
-        return agents.RunModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.RunModel(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def modify_model(self, state: GraphState) -> GraphState:
-        return agents.ModifyModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.ModifyModel(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def info_type_identifier(self, state: GraphState) -> GraphState:
-        return agents.InfoTypeIdentifier(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.InfoTypeIdentifier(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def rag_search(self, state: GraphState) -> GraphState:
-        return agents.ResearchInfoRAG(chat_model, json_model, ht_model, retriever, web_tool, state, self.app, self.debug).execute()
+        return agents.ResearchInfoRAG(llm_models, retriever, web_tool, state, self.app, self.debug).execute()
     
     def consult_model(self, state: GraphState) -> GraphState:
-        return agents.ConsultModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.ConsultModel(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def compare_model(self, state: GraphState) -> GraphState:
-        return agents.CompareModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.CompareModel(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     def plot_model(self, state: GraphState) -> GraphState:
-        return agents.PlotModel(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
-    
-    def actions_analyzer(self, state: GraphState) -> GraphState:
-        return agents.ActionsAnalyzer(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.PlotModel(llm_models, self.es_models, state, self.app, self.debug).execute()
 
     def output_generator(self, state: GraphState) -> GraphState:
-        return agents.OutputGenerator(chat_model, json_model, ht_model, self.base_model, self.mod_model, state, self.app, self.debug).execute()
+        return agents.OutputGenerator(llm_models, self.es_models, state, self.app, self.debug).execute()
     
     # Printers (nodes of the Graph)
 
@@ -157,6 +168,9 @@ class GraphBuilder(ABC):
         return printers.FinalAnswerPrinter(state, self.debug).execute()
     
     # Routers (conditional edges of the Graph)
+
+    def bypass_router(self, state: GraphState) -> str:
+        return routers.BypassRouter(state, self.debug).execute()
 
     def type_router(self, state: GraphState) -> str:
         return routers.TypeRouter(state, self.debug).execute()
@@ -183,9 +197,11 @@ class GraphBuilder(ABC):
 
         ### Define the nodes ###
         workflow.add_node("date_getter", self.date_getter)
+        workflow.add_node("tool_bypasser", self.tool_bypasser)
         workflow.add_node("type_identifier", self.type_identifier)
-        workflow.add_node("es_actions_analyzer", self.es_actions_analyzer)
         workflow.add_node("input_consolidator", self.input_consolidator)
+        workflow.add_node("es_necessary_actions", self.es_necessary_actions)
+        workflow.add_node("es_action_selector", self.es_action_selector)
         workflow.add_node("context_analyzer", self.context_analyzer)
         workflow.add_node("mixed", self.mixed)
         workflow.add_node("query_generator", self.query_generator)
@@ -198,7 +214,6 @@ class GraphBuilder(ABC):
         workflow.add_node("consult_model", self.consult_model)
         workflow.add_node("compare_model", self.compare_model)
         workflow.add_node("plot_model", self.plot_model)
-        workflow.add_node("actions_analyzer", self.actions_analyzer)
         workflow.add_node("output_generator", self.output_generator)
         workflow.add_node("es_state_printer", self.state_printer)
         workflow.add_node("context_state_printer", self.state_printer)
@@ -208,7 +223,15 @@ class GraphBuilder(ABC):
         
         # Entry and query type routing
         workflow.set_entry_point("date_getter")
-        workflow.add_edge("date_getter", "type_identifier")
+        workflow.add_edge("date_getter", "tool_bypasser")
+        workflow.add_conditional_edges(
+            "tool_bypasser",
+            self.bypass_router,
+            {
+                "output": "output_generator",
+                "tool": "type_identifier"
+            }
+        )
         workflow.add_conditional_edges(
             "type_identifier",
             self.type_router,
@@ -230,9 +253,10 @@ class GraphBuilder(ABC):
         )
 
         # Energy System branch
-        workflow.add_edge("input_consolidator", "es_actions_analyzer")
+        workflow.add_edge("input_consolidator", "es_necessary_actions")
+        workflow.add_edge("es_necessary_actions", "es_action_selector")
         workflow.add_conditional_edges(
-            "es_actions_analyzer",
+            "es_action_selector",
             self.es_action_router,
             {
                 "run": "run_model",
@@ -257,16 +281,7 @@ class GraphBuilder(ABC):
         workflow.add_edge("rag_search", "es_state_printer")
         workflow.add_edge("compare_model", "es_state_printer")
         workflow.add_edge("plot_model", "es_state_printer")
-        workflow.add_edge("es_state_printer", "actions_analyzer")
-        
-        workflow.add_conditional_edges(
-            "actions_analyzer",
-            self.context_router,
-            {
-                "ready_to_answer": "output_generator",
-                "need_context": "es_actions_analyzer",
-            },
-        )
+        workflow.add_edge("es_state_printer", "es_action_selector")
 
         # General branch
         workflow.add_conditional_edges(

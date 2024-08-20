@@ -88,16 +88,17 @@ class InputGetter(ABC):
         self.destroy()
 
 class AgentBase(ABC):
-    def __init__(self, chat_model, json_model, ht_model, base_model, mod_model, state: GraphState, app, debug):
-        self.chat_model = chat_model
-        self.json_model = json_model
-        self.ht_model = ht_model
+    def __init__(self, llm_models, es_models, state: GraphState, app, debug):
+        self.chat_model = llm_models['chat_model']
+        self.json_model = llm_models['json_model']
+        self.ht_model = llm_models['ht_model']
+        self.ht_json_model = llm_models['ht_json_model']
         self.state = state
         self.debug = debug
         self.app = app
         self.selected_value = None
-        self.base_model = base_model
-        self.mod_model = mod_model
+        self.base_model = es_models['base_model']
+        self.mod_model = es_models['mod_model']
         self.helper = HelperFunctions()
         
     def confirm_selection(self, selected_value):
@@ -111,12 +112,13 @@ class AgentBase(ABC):
         pass
     
 class ResearchAgentBase(ABC):
-    def __init__(self, chat_model, json_model, ht_model, retriever, web_tool, state: GraphState, app, debug):
+    def __init__(self, llm_models, retriever, web_tool, state: GraphState, app, debug):
         self.retriever = retriever
         self.web_tool = web_tool
-        self.chat_model = chat_model
-        self.json_model = json_model
-        self.ht_model = ht_model
+        self.chat_model = llm_models['chat_model']
+        self.json_model = llm_models['json_model']
+        self.ht_model = llm_models['ht_model']
+        self.ht_json_model = llm_models['ht_json_model']
         self.state = state
         self.debug = debug
         self.app = app
@@ -158,6 +160,7 @@ class DateGetter(AgentBase):
         return super().get_prompt_template()
     
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Processing')
         num_steps = self.state['num_steps']
         num_steps += 1
         
@@ -172,6 +175,68 @@ class DateGetter(AgentBase):
         self.state['context'] = [result]
         self.state['num_steps'] = num_steps
 
+        return self.state
+
+class ToolBypasser(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are part of the Energy System Insight Tool (ESIT), you are responsible for checking
+            if the user trying to have a simple conversation with the tool instead of search for
+            information or manipulate the model. \n
+
+            Considering the USER_INPUT you should decide whether to route
+            the user to the tool or simply bypass it to generate a simple answer to the user. \n
+            
+            The tool you are able to bypass can do the following:
+            - Discover information about date and time;
+            - Search the web for information;
+            - Solve any mathematical problem;
+            - Solve any type of manipulation to the model;
+            - Consult any information about the model;
+            You should only bypass the tool if you think the user request don't need any of these. \n
+            
+            Restrain yourself to bypassing simple interactions only, if there is any complexity
+            involving the necessary answer, simply route to the tool. If the USER_INPUT says something
+            about trying again, or running something again, or doing something again in any sense, 
+            route the pipeline to the tool, never to the output. \n
+            
+            NEVER BYPASS ANY INPUT THAT SAYS THINGS RELATED TO ENERGY SYSTEM MODELING! \n
+            
+            You must output a JSON with a single key 'is_conversation' containing exclusivelly the 
+            selected type, which can be either true or false (use full lowercase for the boolean). \n
+            
+            Always use double quotes in the JSON object. \n
+            
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT : {user_input} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["user_input","history"],
+        )
+    
+    def execute(self) -> GraphState:
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.json_model | JsonOutputParser()
+        
+        user_input = self.state['user_input']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        llm_output = llm_chain.invoke({"user_input": user_input})
+        is_conversation = llm_output['is_conversation']
+        if type(is_conversation) == str:
+            is_conversation = True if is_conversation == 'true' else False
+        elif type(is_conversation) != bool:
+            is_conversation = False
+        
+        if self.debug:
+            self.helper.save_debug("---TYPE IDENTIFIER---")
+            self.helper.save_debug(f'USER INPUT: {user_input.rstrip()}')
+            self.helper.save_debug(f'BYPASS TO OUTPUT: {is_conversation}\n')
+        
+        self.state['is_conversation'] = is_conversation
+        self.state['num_steps'] = num_steps
+        
         return self.state
 
 class TypeIdentifier(AgentBase):
@@ -191,7 +256,9 @@ class TypeIdentifier(AgentBase):
             consults to the paper related to the model for more details. Anything on these lines
             should use this branch. You should also use this branch when the user talks about
             technical parameters, parametrization in general and asks about cientific data
-            related to the development of the paper/model. \n
+            related to the development of the paper/model. Inputs without previous context pointing
+            to the model that talk about changes, modifications, and other stuff related to 
+            comparisons in different years normally are also related to the energy system. \n
             
             "mixed": the USER_INPUT would be identified as "energy_system", but there are references in
             the input that must be researched online to be able to gather the necessary context for the
@@ -257,6 +324,12 @@ class InputConsolidator(AgentBase):
             2. Build a new 'consolidated_input' adding the necessary information from the
             CHAT_HISTORY, while still keeping it as similar as possible with USER_INPUT. \n
             
+            When modifying the input you must restrain yourself to substituting references to
+            specific data by the data itself, for example, if the user talked about a specific
+            parameter in the past message, and now said something like 'now modify it to X', you
+            should substitute 'it' by the parameter name. Never add context related to results
+            or general information. You should keep your rewriting as minimal as possible. \n
+            
             Always use double quotes in the JSON object. \n
             
             <|eot_id|><|start_header_id|>user<|end_header_id|>
@@ -288,53 +361,42 @@ class InputConsolidator(AgentBase):
         
         return self.state
 
-class ESActionsAnalyzer(AgentBase):
+class ESNecessaryActionsSelector(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are an expert at verifying the provided CONTEXT and ACTION_HISTORY of a model
-            interaction to decide what is the next step to be taken based on the USER_INPUT.
-            You know how to avoid repeating instructions and do only the necessary to reach
-            the user's request. \n
+            You are an expert at understanding the USER_INPUT and modifying ACTION_HISTORY to select
+            the necessary actions to be taken to fulfill the user's request. \n
             
-            You have a total of 6 actions that can be taken. You can modify the model, run the model,
-            consult data about the model and the theory behind it, compare the results
-            of the model, plot the results of the model and no action in case there is nothing more
-            to be done and the output can be generated to the user. \n
+            ACTION_HISTORY provides you with the available actions to be taken, your job is to modify the
+            dictionary to select the actions to take. You'll receive all actions as 'no', to select an action
+            simply change that to 'yes', the rest of the pipeline will take care of executing them. \n
             
-            The user will provide you with a USER_INPUT and you should define the line of action to take.
-            CONTEXT and ACTION_HISTORY is also there for you to know what you already did in past iterations. \n
+            The actions are 'modify' to modify the model, 'run' to run the modified model, 'compare' to
+            compare the original results with the ones of the modified model, 'plot' to show the visualization
+            of the new results to the user, and 'consult' to check details regarding the construction of the model
+            (not the details of de modeling values or results, only the theory behind the model). \n
             
-            Normally the USER_INPUT will be one of the following two types:
-            1. The user asked about a specific scenario layout, for example "what would happend if we reduce
-            the CO2 limit by half?", in this kind of scenario you will modify the model to reach what was asked,
-            run the simulation and compare/plot the results to the user to check what happened in the proposed
-            situation. Don't forget to get an analysis of the result after the run, it's important that the
-            user get an explanation and a visualization of the results;
-            2. The user asked a more direct question such as "how are CHPs modeled?" or "show me the sankey
-            diagram of the model", in this kind of scenario you will limit your actions to what the user is
-            asking directly; \n
+            There are two types of USER_INPUT:
+            1. Gives you a direct command related to one or more of the available actions, such as asking you
+            to modify a value, or to run a model, to plot some specific data, compare the already available
+            results or consult details about the modeling process. In this case, you should only request the
+            actions the user has asked;
+            2. Gives you a scenario without specifying any command, asking for details about the scenario
+            for example. In this case you need to modify, run, analyze and plot the results to the user. \n
             
-            You must output a JSON object with a single key called 'action' that represents the next action
-            we need to take in order to reach what the user requested, this key can contain one
-            of the following values: ['modify', 'run', 'consult', 'compare', 'plot', 'no_action']. \n
+            IMPORTANT if the user is just request you to modify something without asking you to run the model, then
+            you should assume you should only modify it. If the user actually wanted to run, he will ask later. \n
             
-            Running a model is expensive, so, unless the user asks you explicitly to run the model in
-            a certain way, or he asks for the differences in results after changing certain aspects of
-            the model, don't run it. \n
-            
-            You may also check for the CHAT_HISTORY to verify what already happened in this session
-            of the chat with the user. \n
+            You must output a JSON with the modified dictionary. \n
             
             Always use double quotes in the JSON object. \n
             
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT : {user_input} \n
             ACTION_HISTORY: {action_history} \n
-            CONTEXT: {context} \n
-            CHAT_HISTORY: {history} \n
             <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["user_input", "action_history", "context", "history"],
+            input_variables=["user_input", "action_history"],
         )
         
     def execute(self) -> GraphState:
@@ -343,17 +405,47 @@ class ESActionsAnalyzer(AgentBase):
         
         user_input = self.state['consolidated_input']
         action_history = self.state['action_history']
-        context = self.state['context']
-        history = self.state['history']
         num_steps = self.state['num_steps']
         num_steps += 1
-
-        llm_output = llm_chain.invoke({"user_input": user_input, "action_history": action_history, "context": context, "history": history})
-        selected_action = llm_output['action']
+        
+        llm_output = llm_chain.invoke({"user_input": user_input, "action_history": action_history})
         
         if self.debug:
-            self.helper.save_debug("---ENERGY SYSTEM ACTIONS---")
+            self.helper.save_debug("---ENERGY SYSTEM NECESSARY ACTIONS---")
             self.helper.save_debug(f'USER INPUT: {user_input.rstrip()}')
+            self.helper.save_debug(f'NECESSARY ACTIONS: {llm_output}\n')
+            
+        self.state['action_history'] = llm_output
+        self.state['num_steps'] = num_steps
+        
+        return self.state
+
+class ESActionSelector(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return super().get_prompt_template()
+        
+    def execute(self) -> GraphState:
+        self.helper.save_chat_status('Processing')
+        action_history = self.state['action_history']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        # These actions must be taken in this order of priority
+        if action_history['modify'] in ['yes', 'repeat']:
+            selected_action = 'modify'
+        elif action_history['run'] == 'yes':
+            selected_action = 'run'
+        elif action_history['compare'] == 'yes':
+            selected_action = 'compare'
+        elif action_history['plot'] == 'yes':
+            selected_action = 'plot'
+        elif action_history['consult'] == 'yes':
+            selected_action = 'consult'
+        else:
+            selected_action = 'no_action'
+        
+        if self.debug:
+            self.helper.save_debug("---ENERGY SYSTEM ACTION SELECTOR---")
             self.helper.save_debug(f'SELECTED ACTION: {selected_action}\n')
             
         self.state['next_action'] = selected_action
@@ -516,6 +608,7 @@ class ContextAnalyzer(AgentBase):
         )
         
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Processing')
         prompt = self.get_prompt_template()
         llm_chain = prompt | self.json_model | JsonOutputParser()
         
@@ -556,6 +649,7 @@ class ResearchInfoWeb(ResearchAgentBase):
         )
         
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Searching info in the internet')
         if self.debug:
             self.helper.save_debug("---RESEARCH INFO SEARCHING---")
             
@@ -638,6 +732,7 @@ class Calculator(AgentBase):
         )
         
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Calculating result')
         prompt = self.get_prompt_template()
         llm_chain = prompt | self.json_model | JsonOutputParser()
     
@@ -672,6 +767,7 @@ class RunModel(AgentBase):
         return super().get_prompt_template()
     
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Running model')
         action_history = self.state['action_history']
         num_steps = self.state['num_steps']
         num_steps += 1
@@ -731,9 +827,10 @@ class RunModel(AgentBase):
             result = 'The model has runned successfully!'
         except:
             result = 'Something went wrong and the model has not completely runned.'
-            
+        
+        action_history['run'] = 'done'
         self.state['num_steps'] = num_steps
-        self.state['action_history'] = action_history + [result]
+        self.state['action_history'] = action_history
         
         return self.state
 
@@ -750,9 +847,6 @@ class ModifyModel(AgentBase):
             You should only output 'scenario' instead if the user explicitly talks about co2 limit, co2 price
             or discount rate, these terms must be included in the query. \n
             
-            The only exception to this rule is that if the USER_INPUT leads to the selection to be 'scenario' but
-            SCENARIO_MODDED is True, then you should output 'conversionsubprocess' anyway. \n
-            
             Remember that for the sheet to be 'scenario' you need to receive explicitly the defined terms from
             the USER_INPUT. \n
             
@@ -760,12 +854,11 @@ class ModifyModel(AgentBase):
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
-            SCENARIO_MODDED: {scen_modded}
             Answer:
             <|eot_id|>
             <|start_header_id|>assistant<|end_header_id|>
             """,
-            input_variables=["user_input", "scen_ready"],
+            input_variables=["user_input"],
         )
     
     def get_scenario_param_prompt_template(self) -> PromptTemplate:
@@ -946,7 +1039,33 @@ class ModifyModel(AgentBase):
             input_variables=["user_input","context","current_values"],
         )
 
+    def get_mod_ready_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are a specialist at identifying if there is any more modifications to be done to a given model. \n
+            
+            You will receive the USER_INPUT that trigered the modification process and the MODIFICATIONS that were
+            already done to the model. Your goal is determine if the necessary modifications were already done
+            or if there are still parameters to be modified in the model. \n
+            
+            Your output must be a JSON object with a single key 'ready' with a boolean (always write booleans
+            with lowercase) that states whether the modifications are ready or if the model needs to be further
+            modified. \n
+            
+            Always use double quotes in the JSON object. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            MODIFICATIONS: {modifications}
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input", "modifications"],
+        )
+
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Modifying model')
         if self.debug:
             self.helper.save_debug('---MODEL MODIFIER---')
         
@@ -955,6 +1074,7 @@ class ModifyModel(AgentBase):
         # Define prompts
         sheet_selector_prompt = self.get_sheet_selector_prompt_template()
         scenario_param_prompt = self.get_scenario_param_prompt_template()
+        mod_ready_prompt = self.get_mod_ready_prompt_template()
         params_general_prompt = self.get_params_general_prompt_template()
         select_cs_prompt = self.get_select_cs_prompt_template()
         select_params_prompt = self.get_select_params_prompt_template()
@@ -963,6 +1083,7 @@ class ModifyModel(AgentBase):
         # Define chains
         sheet_selector_chain = sheet_selector_prompt | self.json_model | JsonOutputParser()
         scenario_param_chain = scenario_param_prompt | self.json_model | JsonOutputParser()
+        mod_ready_chain = mod_ready_prompt | self.json_model | JsonOutputParser()
         params_general_chain = params_general_prompt | self.json_model | JsonOutputParser()
         select_cs_chain = select_cs_prompt | self.json_model |JsonOutputParser()
         select_params_chain = select_params_prompt | self.json_model |JsonOutputParser()
@@ -972,7 +1093,6 @@ class ModifyModel(AgentBase):
         user_input = self.state['consolidated_input']
         context = self.state['context']
         action_history = self.state['action_history']
-        scen_modded = self.state['scen_modded']
         num_steps = self.state['num_steps']
         num_steps += 1
 
@@ -980,10 +1100,13 @@ class ModifyModel(AgentBase):
         params, CSs = helper.get_params_and_cs_list(self.base_model)
         scen_params = helper.get_scenario_params(self.base_model)
         
-        # Selects the sheet that must be modified (scenario or cs)
-        sheet_selection = sheet_selector_chain.invoke({"user_input": user_input,
-                                                       "scen_modded": scen_modded})
-        sheet = sheet_selection['sheet']
+        # If the modification already happened, go directly to conversionsubprocess
+        if action_history['modify'] == 'repeat':
+            sheet = 'conversionsubprocess'
+        else:
+            # Selects the sheet that must be modified (scenario or cs)
+            sheet_selection = sheet_selector_chain.invoke({"user_input": user_input})
+            sheet = sheet_selection['sheet']
         
         # Load workbook for modifications
         workbook = load_workbook(filename=self.base_model)
@@ -994,6 +1117,17 @@ class ModifyModel(AgentBase):
                                                       "scen_params": scen_params})
             
             workbook, result = helper.modify_scenario_sheet(workbook, new_params)
+            if len(result) == 0:
+                message = 'Nothing was modified'
+            else:
+                message = f'The model was modified as follows:{result}'
+            
+            modifications_ready = mod_ready_chain.invoke({"user_input": user_input,
+                                                          "modifications": message})
+            if modifications_ready['ready']:
+                action_history['modify'] = 'done'
+            else:
+                action_history['modify'] = 'repeat'
         else:
             # Defines the type of parametrization (defined or undefined)
             parametrization_type = params_general_chain.invoke({"user_input": user_input})
@@ -1023,24 +1157,28 @@ class ModifyModel(AgentBase):
             # IF the agent indicates that the modification was successfull, then apply them to the sheet
             if new_params['success']:
                 workbook, result = helper.modify_cs_sheet(workbook, new_params)
+                if len(result) == 0:
+                    message = 'Nothing was modified'
+                else:
+                    message = f'The model was modified as follows:{result}'
             else:
-                result = ['Failed to generate the correct modified set of parameters.']
+                message = ['Failed to generate the correct modified set of parameters.']
+            
+            action_history['modify'] = 'done'
                         
         try:
             # Try to save, if it saves and the scenario was modified, mark it as modified
             workbook.save(filename=self.mod_model)
-            if sheet == 'scenario':
-                scen_modded = True
         except:
-            result = ['Failed to save the modifications']
+            message = ['Failed to save the modifications']
+            action_history['modify'] = 'done'
         
         if self.debug:
-            self.helper.save_debug(f'FINAL RESULTS OF MODIFICATION:\n{result}\n')
+            self.helper.save_debug(f'FINAL RESULTS OF MODIFICATION:\n{message}\n')
         
         self.state['num_steps'] = num_steps
-        self.state['scen_modded'] = scen_modded
-        self.state['context'] = context + [f'The model was modified as follows:{result}']
-        self.state['action_history'] = action_history + ['The model was successfully modified!']
+        self.state['context'] = context + [message]
+        self.state['action_history'] = action_history
         
         return self.state
 
@@ -1121,6 +1259,7 @@ class ResearchInfoRAG(ResearchAgentBase):
         )
         
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Consulting the source paper')
         question_rag_prompt = self.get_prompt_template()
         answer_analyzer_prompt = self.get_answer_analyzer_prompt_template()
         
@@ -1171,9 +1310,7 @@ class ConsultModel(AgentBase):
             should be made to the model to return the required information to the user. \n
             
             You'll receive CONVERSION_PROCESSES, CONVERSION_SUBPROCESSES, PARAMETERS and SCENARIO_INFO
-            as context, as well as MODEL_INFOS, which is a list of information about the model that was
-            already gathered. You should always focus on completing the necessary information, while
-            avoiding to get information that already exists. \n
+            as context. \n
             
             CONVERSION_PROCESSES is a list with the name of all conversion processes. They are the general 
             processes of energy conversion and generation, better fragmentalized in CONVERSION_SUBPROCESSES. \n
@@ -1217,12 +1354,11 @@ class ConsultModel(AgentBase):
             CONVERSION_SUBPROCESSES: {cs} \n
             PARAMETERS: {param} \n
             SCENARIO_INFO: {scen_infos} \n
-            MODEL_INFOS: {model_infos} \n
             Answer:
             <|eot_id|>
             <|start_header_id|>assistant<|end_header_id|>
             """,
-            input_variables=["user_input","cp","cs","param","scen_infos","model_infos"],
+            input_variables=["user_input","cp","cs","param","scen_infos"],
         )
     
     def get_summarizing_prompt_template(self) -> PromptTemplate:
@@ -1269,10 +1405,10 @@ class ConsultModel(AgentBase):
         )
     
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Consulting the model data')
         user_input = self.state['consolidated_input']
         context = self.state['context']
         action_history = self.state['action_history']
-        model_info = self.state['model_info']
         num_steps = self.state['num_steps']
         num_steps += 1
         
@@ -1292,8 +1428,7 @@ class ConsultModel(AgentBase):
                                              "cp": CPs,
                                              "cs": CSs,
                                              "param": params,
-                                             "scen_infos": scen_infos,
-                                             "model_infos": model_info})
+                                             "scen_infos": scen_infos})
         
         if self.debug:
             self.helper.save_debug('---CONSULT MODEL---')
@@ -1312,8 +1447,8 @@ class ConsultModel(AgentBase):
             self.helper.save_debug(f'GATHERED INFO ABOUT THE MODEL: {summed_up_info}')
         
         self.state['num_steps'] = num_steps
-        self.state['action_history'] = action_history + ['The model was consulted']
-        self.state['model_info'] = model_info + [summed_up_info]
+        action_history['consult'] = 'done'
+        self.state['action_history'] = action_history
         self.state['context'] = context + [summed_up_info]
         
         return self.state
@@ -1352,6 +1487,7 @@ class CompareModel(AgentBase):
             )
     
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Comparing results')
         user_input = self.state['consolidated_input']
         context = self.state['context']
         action_history = self.state['action_history']
@@ -1430,7 +1566,8 @@ class CompareModel(AgentBase):
             self.helper.save_debug(f'ANALYSIS: {llm_output}\n')
         
         self.state['context'] = context + [llm_output]
-        self.state['action_history'] = action_history + ['The results were successfully analyzed!']
+        action_history['compare'] = 'done'
+        self.state['action_history'] = action_history
         self.state['num_steps'] = num_steps
         
         return self.state
@@ -1476,14 +1613,12 @@ class PlotModel(AgentBase):
         )
     
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Plotting results')
         user_input = self.state['consolidated_input']
         action_history = self.state['action_history']
         context = self.state['context']
         num_steps = self.state['num_steps']
         num_steps += 1
-        
-        if self.debug:
-            self.helper.save_debug('---PLOT RESULTS---')
         
         prompt = self.get_prompt_template()
         llm_chain = prompt | self.json_model | JsonOutputParser()
@@ -1523,6 +1658,10 @@ class PlotModel(AgentBase):
 
         selected_plots = output['plots']
         successful_plots = False
+        
+        if self.debug:
+            self.helper.save_debug('---PLOT RESULTS---')
+            self.helper.save_debug(f'SELECTED PLOTS: {selected_plots}\n')
 
         for plot in selected_plots:
             plot_type = plot[0]
@@ -1563,93 +1702,17 @@ class PlotModel(AgentBase):
             data to generate a visual plot to the user. Simply tell him that it was plotted and the data is now available
             for him to check.
             """
-            result = ['The requested data was successfully plotted!']
         else:
             message = """
             The requested data was not successfully plotted, however, there is no need to try to manipulate any
             data to generate a visual plot to the user. Simply tell him that a problem occured and he should try
             again later.
             """
-            result = ['The requested data failed to be plotted.']
             
         self.state['num_steps'] = num_steps
-        self.state['action_history'] = action_history + result
+        action_history['plot'] = 'done'
+        self.state['action_history'] = action_history
         self.state['context'] = context + [message]
-        
-        return self.state
-
-class ActionsAnalyzer(AgentBase):
-    def get_prompt_template(self) -> PromptTemplate:
-        return PromptTemplate(
-            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a expert at checking the actions that were already taken regarding model
-            manipulation, as well as checking if all requested information is already
-            available for an output to be generated for the user. \n
-            
-            You have access to USER_INPUT, CONTEXT, MODEL_INFO and ACTION_HISTORY. USER_INPUT
-            tells you what is the goal of the user, CONTEXT shows you the general information
-            that may be needed to answer the user input, MODEL_INFO has the information about
-            the model that may be needed to answer the user, and ACTION_HISTORY shows you what
-            was already done to reach the goal of fulfilling the user's request. \n
-            
-            Normally the USER_INPUT will be one of the following two types:
-            1. The user asked about a specific scenario layout, for example "what would happend if we reduce
-            the CO2 limit by half?", in this kind of scenario you can only indicate that you are ready to answer
-            if all necessary actions were executed, namely, you need to ensure that model was successfully modified,
-            the simulation runned and that you've got an analysis of the results (that will also be confirmed in
-            ACTION_HISTORY) potentially with the plot of some data;
-            2. The user asked a more direct question such as "how are CHPs modeled?" or "show me the sankey
-            diagram of the model", in this kind of scenario you will just check if all cited actions were
-            concluded before saying you're ready to answer; \n
-            
-            You can also always check the CHAT_HISTORY to check if the input provided by the
-            user references another past message. \n
-            
-            You must output a JSON with a single key 'ready_to_answer' that may be either true
-            or false, depending on your judgement on the completeness of the data regarding
-            the input. ALWAYS WRITE THE BOOLEAN IN LOWERCASE, OTHERWISE THE JSON PARSE WILL FAIL. \n
-            
-            If you find messages stating that something failed during the execution of any action
-            taken by the modeling tools, you MUST output 'ready_to_answer' as true. The
-            output generator will deal with telling the user that it failed. \n
-            
-            Always use double quotes in the JSON object. \n
-
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            USER_INPUT: {user_input} \n
-            CONTEXT: {context} \n
-            MODEL_INFO: {model_info} \n
-            ACTION_HISTORY: {action_history} \n
-            CHAT_HISTORY: {history} \n
-            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["user_input","context","model_info","action_history","history"],
-        )
-        
-    def execute(self) -> GraphState:
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        
-        ## Get the state
-        user_input = self.state['consolidated_input']
-        context = self.state['context']
-        model_info = self.state['model_info']
-        action_history = self.state['action_history']
-        history = self.state['history']
-        num_steps = self.state['num_steps']
-        num_steps += 1
-
-        llm_output = llm_chain.invoke({"user_input": user_input,
-                                       "context": context,
-                                       "model_info": model_info,
-                                       "action_history": action_history,
-                                       "history": history})
-        
-        if self.debug:
-            self.helper.save_debug("---ACTIONS ANALYZER---")
-            self.helper.save_debug(f'IS READY TO ANSWER: {llm_output["ready_to_answer"]}\n')
-        
-        self.state['next_query'] = llm_output
-        self.state['num_steps'] = num_steps
         
         return self.state
 
@@ -1659,7 +1722,11 @@ class OutputGenerator(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            You are a specialist at answering the user based on context given. \n
+            You are part of the Energy System Insight Tool (ESIT), a tool tailored
+            to use LLM agents to help users to analyze, manipulate and understand
+            energy system models. You are the last agent of the tool, responsible
+            for summing up the results generated by other agents in the output
+            to be given to the user. \n
             
             Given the USER_INPUT and a CONTEXT, generate an answer for the query
             asked by the user. You should make use of the provided information
@@ -1697,6 +1764,9 @@ class OutputGenerator(AgentBase):
             
             It's important never to cite the variables you receive, answer the most
             naturally as possible trying to make it as it was a simple conversation. \n
+            
+            You will always have access to the current time, but don't mention it unless
+            necessary for what the user asked to the tool. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -1708,8 +1778,9 @@ class OutputGenerator(AgentBase):
         )
         
     def execute(self) -> GraphState:
+        self.helper.save_chat_status('Generating output')
         prompt = self.get_prompt_template()
-        llm_chain = prompt | self.chat_model | StrOutputParser()
+        llm_chain = prompt | self.ht_model | StrOutputParser()
         
         ## Get the state
         user_input = self.state['user_input']
@@ -1728,7 +1799,6 @@ class OutputGenerator(AgentBase):
         if '\nSource:\n- None' in llm_output:
             llm_output = llm_output.replace('\nSource:\n- None','')
             
-        self.state['scen_modded'] = False
         self.state['num_steps'] = num_steps
         self.state['final_answer'] = llm_output
         

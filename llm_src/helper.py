@@ -1,4 +1,5 @@
 import math
+import pickle
 import pandas as pd
 from abc import ABC
 
@@ -118,6 +119,9 @@ class HelperFunctions(ABC):
                 cond = df['conversion_process_name'] == split_cs[0]
             
             for param in param_list:
+                if '-' in param:
+                    param_split = param.split('-')
+                    param = param_split[0].strip()
                 try:
                     if len(split_cs) > 1:
                         result = result + [cs, param, df[param][cond].values[0], df[param][1]]
@@ -223,11 +227,20 @@ class HelperFunctions(ABC):
                     old_value = cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value
                     cs_sheet[f'{param_idx[0]}{cs_idx[1:]}'].value = new_value
                     
-                    result = result + [f'{param_name} of {cs_name} modified from {old_value} to {new_value} ({unit})']
+                    if new_value != old_value:
+                        result = result + [f'{param_name} of {cs_name} modified from {old_value} to {new_value} ({unit})']
                 
         return workbook, result
     
+    def save_history(self, history):
+        with open("metadata/chat_history.pkl", "wb") as f:
+            pickle.dump(history, f)
+    
     def save_debug(self, debug_string):
         print(debug_string)
-        with open('debug.log', 'a') as f:
+        with open('metadata/debug.log', 'a') as f:
             f.write(f'{str(debug_string)}\n')
+            
+    def save_chat_status(self, status):
+        with open('metadata/status.log', 'w') as f:
+            f.write(status)

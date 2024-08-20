@@ -14,7 +14,7 @@ from llm_src.helper import HelperFunctions
 class Chat(ABC):
     def __init__(self, graph: StateGraph, recursion_limit, debug):
         try:
-            os.remove("chat_history.pkl")
+            os.remove("metadata/chat_history.pkl")
         except:
             pass
         self.graph = graph
@@ -25,14 +25,20 @@ class Chat(ABC):
     def invoke(self, input) -> str:
         # run the agent
         try:
-            with open("chat_history.pkl", "rb") as f:
+            with open("metadata/chat_history.pkl", "rb") as f:
                 history = pickle.load(f)
         except:
             history = []
         history.append({"role": "user", "content": input})
+        self.helper.save_history(history)
 
         inputs = GraphState.initialize(input, history)
         for output in self.graph.stream(inputs, {"recursion_limit": self.recursion_limit}):
+            with open('metadata/chat_control.log', 'r') as f:
+                control_flag = f.read()
+            if control_flag == 'aborting':
+                value['final_answer'] = 'Generation aborted'
+                break
             for key, value in output.items():
                 if self.debug:
                     self.helper.save_debug(f"Finished running <{key}> \n")
@@ -110,7 +116,7 @@ class App(customtkinter.CTk):
     
     def update_debug(self):
         try:
-            os.remove('debug.log')
+            os.remove('metadata/debug.log')
         except:
             pass
         self.debug_textbox.configure(state="normal")
@@ -120,7 +126,7 @@ class App(customtkinter.CTk):
         
         while self.chat_running:
             try:
-                with open('debug.log') as f:
+                with open('metadata/debug.log') as f:
                     f.seek(last_position)
                     new_log = f.read()
                     last_position = f.tell()
@@ -140,15 +146,33 @@ class App(customtkinter.CTk):
 
         def update_text():
             if self.chat_running:
-                self.button.configure(text=f'Processing{states[self.animate_index]}')
+                try:
+                    with open('metadata/status.log', 'r') as f:
+                        status = f.read()
+                except:
+                    status = 'Processing'
+                try:
+                    with open('metadata/chat_control.log', 'r') as f:
+                        control_flag = f.read()
+                    if control_flag == 'aborting':
+                        status = 'Aborting'
+                except:
+                    pass
+                self.entry.configure(state="normal")
+                self.entry.delete('0.0', END)
+                self.entry.insert('0.0', f'{status}{states[self.animate_index]}')
+                self.entry.configure(state="disabled")
                 self.animate_index = (self.animate_index + 1) % len(states)
                 self.after(500, update_text)  # Schedule the next update
             else:
+                self.entry.configure(state="normal")
+                self.entry.delete('0.0', END)
                 self.button.configure(text='Send')
 
         update_text()
     
     def submit_message(self):
+        self.button.configure(text='Abort')
         self.input_text = self.entry.get('0.0', END)
         if self.is_first_message:
             new_text = "USER:\n" + self.input_text
@@ -167,7 +191,13 @@ class App(customtkinter.CTk):
         self.is_first_message = False
     
     def button_callback(self):
-        self.submit_message()
+        if self.button._text == 'Send':
+            self.submit_message()
+            with open('metadata/chat_control.log', 'w') as f:
+                f.write('running')
+        elif self.button._text == 'Abort':
+            with open('metadata/chat_control.log', 'w') as f:
+                f.write('aborting')
     
     def on_enter(self, event):
         if self.available:
@@ -181,11 +211,11 @@ class App(customtkinter.CTk):
         
     def call_llm(self):
         self.entry.configure(state="disabled")
-        self.button.configure(state="disabled")
         self.available = False
         try:
             answer = self.chat.invoke(self.input_text)
-        except:
+        except Exception as e:
+            print(e)
             answer = 'An error has ocurred, please try again'
         new_text = "\nASSISTANT:\n" + answer
         self.textbox.configure(state="normal")
@@ -193,8 +223,9 @@ class App(customtkinter.CTk):
         self.textbox.yview_moveto(1)
         self.textbox.configure(state="disabled")
         self.entry.configure(state="normal")
-        self.button.configure(state="normal")
         self.available = True
+        with open('metadata/chat_control.log', 'w') as f:
+            f.write('idle')
         if self.debug:
             self.chat_running = False
         
