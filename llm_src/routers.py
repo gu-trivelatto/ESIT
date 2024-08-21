@@ -186,3 +186,18 @@ class InfoTypeRouter(BaseRouter):
             self.helper.save_debug(message)
             
         return type
+
+class TranslationRouter(BaseRouter):
+    def execute(self) -> str:
+        target_language = self.state['target_language']
+        
+        message = "---TRANSLATOR ROUTER---\nROUTE TO: "
+        
+        if target_language.lower() == 'english':
+            message += "print output"
+            translate = False
+        else:
+            message += "translate output\n"
+            translate = True
+        
+        return translate

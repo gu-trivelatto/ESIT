@@ -27,6 +27,7 @@ class GraphState(TypedDict):
     """
     num_steps: int
     history: List[dict]
+    target_language: str
     user_input: str
     consolidated_input: str
     is_conversation: bool
@@ -46,6 +47,7 @@ class GraphState(TypedDict):
         return GraphState(
             num_steps=0,
             history=history,
+            target_language='',
             user_input=user_input,
             is_conversation=False,
             consolidated_input="",

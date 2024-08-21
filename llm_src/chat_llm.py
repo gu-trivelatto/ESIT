@@ -105,6 +105,9 @@ class GraphBuilder(ABC):
     def date_getter(self, state: GraphState) -> GraphState:
         return agents.DateGetter(llm_models, self.es_models, state, self.app, self.debug).execute()
     
+    def input_translator(self, state: GraphState) -> GraphState:
+        return agents.InputTranslator(llm_models, self.es_models, state, self.app, self.debug).execute()
+    
     def tool_bypasser(self, state: GraphState) -> GraphState:
         return agents.ToolBypasser(llm_models, self.es_models, state, self.app, self.debug).execute()
     
@@ -159,6 +162,9 @@ class GraphBuilder(ABC):
     def output_generator(self, state: GraphState) -> GraphState:
         return agents.OutputGenerator(llm_models, self.es_models, state, self.app, self.debug).execute()
     
+    def output_translator(self, state: GraphState) -> GraphState:
+        return agents.OutputTranslator(llm_models, self.es_models, state, self.app, self.debug).execute()
+    
     # Printers (nodes of the Graph)
 
     def state_printer(self, state: GraphState) -> None:
@@ -190,6 +196,9 @@ class GraphBuilder(ABC):
     def info_type_router(self, state: GraphState) -> str:
         return routers.InfoTypeRouter(state, self.debug).execute()
     
+    def translation_router(self, state: GraphState) -> str:
+        return routers.TranslationRouter(state, self.debug).execute()
+    
     ##### Build the Graph #####
 
     def build(self) -> StateGraph:
@@ -197,6 +206,7 @@ class GraphBuilder(ABC):
 
         ### Define the nodes ###
         workflow.add_node("date_getter", self.date_getter)
+        workflow.add_node("input_translator", self.input_translator)
         workflow.add_node("tool_bypasser", self.tool_bypasser)
         workflow.add_node("type_identifier", self.type_identifier)
         workflow.add_node("input_consolidator", self.input_consolidator)
@@ -215,6 +225,7 @@ class GraphBuilder(ABC):
         workflow.add_node("compare_model", self.compare_model)
         workflow.add_node("plot_model", self.plot_model)
         workflow.add_node("output_generator", self.output_generator)
+        workflow.add_node("output_translator", self.output_translator)
         workflow.add_node("es_state_printer", self.state_printer)
         workflow.add_node("context_state_printer", self.state_printer)
         workflow.add_node("final_answer_printer", self.final_answer_printer)
@@ -223,7 +234,8 @@ class GraphBuilder(ABC):
         
         # Entry and query type routing
         workflow.set_entry_point("date_getter")
-        workflow.add_edge("date_getter", "tool_bypasser")
+        workflow.add_edge("date_getter", "input_translator")
+        workflow.add_edge("input_translator", "tool_bypasser")
         workflow.add_conditional_edges(
             "tool_bypasser",
             self.bypass_router,
@@ -315,7 +327,15 @@ class GraphBuilder(ABC):
         )
 
         # Final steps (generate output and print the final answer)
-        workflow.add_edge("output_generator", "final_answer_printer")
+        workflow.add_conditional_edges(
+            "output_generator",
+            self.translation_router,
+            {
+                True: "output_translator",
+                False: "final_answer_printer"
+            }
+        )
+        workflow.add_edge("output_translator", "final_answer_printer")
         workflow.add_edge("final_answer_printer", END)
 
         return workflow.compile()

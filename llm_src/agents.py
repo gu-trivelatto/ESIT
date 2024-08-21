@@ -177,6 +177,52 @@ class DateGetter(AgentBase):
 
         return self.state
 
+class InputTranslator(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are responsible of verifying if the USER_INPUT is in another language other
+            than english, if so, translate the input. If the text is already in english
+            simply output the same text. \n
+            
+            Your output must be a JSON object with two keys, 'language' and 'input', where
+            'language' is the source language the user wrote and 'input' is the translated
+            input. \n
+        
+            If the language is english, use ALWAYS the whole word to select it, never 'en',
+            'eng', or any other variation. Use ALWAYS 'english'. \n
+            
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT : {user_input} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["user_input"],
+        )
+    
+    def execute(self) -> GraphState:
+        user_input = self.state['user_input']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.ht_json_model | JsonOutputParser()
+
+        llm_output = llm_chain.invoke({"user_input": user_input})
+        translated_user_input = llm_output['input']
+        source_language = llm_output['language']
+        
+        if self.debug:
+            self.helper.save_debug("---TRANSLATE INPUT---")
+            self.helper.save_debug(f'ORIGINAL INPUT:{user_input.rstrip()}')
+            self.helper.save_debug(f'SOURCE LANGUAGE:{source_language}')
+            if source_language.lower() != 'english':
+                self.helper.save_debug(f'TRANSLATED INPUT:{translated_user_input.rstrip()}\n')
+        
+        self.state['num_steps'] = num_steps
+        self.state['user_input'] = translated_user_input
+        self.state['target_language'] = source_language
+        
+        return self.state
+
 class ToolBypasser(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
@@ -231,7 +277,6 @@ class ToolBypasser(AgentBase):
         
         if self.debug:
             self.helper.save_debug("---TYPE IDENTIFIER---")
-            self.helper.save_debug(f'USER INPUT: {user_input.rstrip()}')
             self.helper.save_debug(f'BYPASS TO OUTPUT: {is_conversation}\n')
         
         self.state['is_conversation'] = is_conversation
@@ -1271,6 +1316,7 @@ class ResearchInfoRAG(ResearchAgentBase):
             
         query = self.state['consolidated_input']
         context = self.state['context']
+        action_history = self.state['action_history']
         num_steps = self.state['num_steps']
         num_steps += 1
 
@@ -1295,6 +1341,8 @@ class ResearchInfoRAG(ResearchAgentBase):
         # TODO find a way of referencing the used pdfs
         result = f'Source: PDF paper \n{query}: \n{processed_searches}'
         
+        action_history['consult'] = 'done'
+        self.state['action_history'] = action_history
         self.state['context'] = context + [result]
         self.state['num_steps'] = num_steps
         
@@ -1801,5 +1849,42 @@ class OutputGenerator(AgentBase):
             
         self.state['num_steps'] = num_steps
         self.state['final_answer'] = llm_output
+        
+        return self.state
+    
+class OutputTranslator(AgentBase):
+    def get_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are the final node of a tool, and you are responsible for translating the
+            TOOL_OUTPUT from english to a given TARGET_LANGUAGE. \n
+            
+            Your output must be a JSON object with a single key, 'output', where you should
+            put the translated output. \n
+            
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            TOOL_OUTPUT : {tool_output} \n
+            TARGET_LANGUAGE : {target_language} \n
+            <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+            input_variables=["tool_output", "target_language"],
+        )
+    
+    def execute(self) -> GraphState:
+        final_answer = self.state['final_answer']
+        target_language = self.state['target_language']
+        num_steps = self.state['num_steps']
+        num_steps += 1
+        
+        if self.debug:
+            self.helper.save_debug("---TRANSLATE OUTPUT---")
+            self.helper.save_debug(f'TARGET LANGUAGE: {target_language}\n')
+        
+        prompt = self.get_prompt_template()
+        llm_chain = prompt | self.ht_json_model | JsonOutputParser()
+
+        llm_output = llm_chain.invoke({"tool_output": final_answer, "target_language": target_language})
+        
+        self.state['num_steps'] = num_steps
+        self.state['final_answer'] = llm_output['output']
         
         return self.state

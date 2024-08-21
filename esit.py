@@ -69,7 +69,7 @@ class App(customtkinter.CTk):
                                                 font=("", 16))
         self.textbox.grid(row=0, column=1, rowspan=3, columnspan=3, padx=20, pady=(20, 0), sticky="nsew")
 
-        self.entry = customtkinter.CTkTextbox(master=self, height=80, font=("", 16))
+        self.entry = customtkinter.CTkTextbox(master=self, height=80, font=("", 16), wrap='word')
         self.entry.grid(row=3, column=1, columnspan=2, padx=20, sticky="ew")
         self.entry.bind('<Return>', self.on_enter)
         self.entry.bind('<Shift-Return>', self.new_line)
