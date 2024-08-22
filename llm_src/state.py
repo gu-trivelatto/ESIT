@@ -40,6 +40,7 @@ class GraphState(TypedDict):
     next_action: str
     retrieval_type: str
     model_modified: str
+    sim_status: str
     model_info: List[str]
     final_answer: str
     
@@ -62,6 +63,7 @@ class GraphState(TypedDict):
             next_action="",
             retrieval_type="",
             model_modified=False,
+            sim_status=None,
             model_info=[],
             final_answer=""
         )

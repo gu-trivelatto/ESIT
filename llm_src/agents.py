@@ -1,14 +1,9 @@
 import os
-import math
 import sqlite3
-import numpy as np
-import pandas as pd
-import customtkinter
 import tkinter as tk
 
 from pathlib import Path
 from datetime import datetime
-from tabulate import tabulate
 from CESM.core.model import Model
 from CESM.core.input_parser import Parser
 from CESM.core.plotter import Plotter, PlotType
@@ -24,68 +19,6 @@ from langchain_core.output_parsers import JsonOutputParser
 
 # TODO standardize variable names used from the state
 # TODO standardize the way the agents interact with the state
-# TODO add a filtering agent at the start to bypass simple conversation to go directly to the output_generator
-
-class InputGetter(ABC):
-    def __init__(self, *args, **kwargs):
-        # Extract label, buttons, and callback from kwargs
-        label = kwargs.pop('label', None)
-        buttons = kwargs.pop('buttons', [])
-        app = kwargs.pop('app', None)
-        self.callback = kwargs.pop('callback', None)
-
-        #super().__init__(*args, **kwargs)
-        self.toplevel = customtkinter.CTkToplevel(app)
-        self.toplevel.geometry("800x600")
-
-        # Create a canvas and a scrollbar
-        self.canvas = tk.Canvas(self.toplevel, borderwidth=0, background="#ffffff")
-        self.scrollbar = customtkinter.CTkScrollbar(self.toplevel, orientation="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-
-        self.scrollable_frame = customtkinter.CTkFrame(self.canvas)
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(
-                scrollregion=self.canvas.bbox("all")
-            )
-        )
-
-        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw", width=800)
-
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.scrollbar.pack(side="right", fill="y")
-
-        # Bind mouse scroll events
-        self.canvas.bind_all("<MouseWheel>", self._on_mouse_scroll)
-        self.canvas.bind_all("<Button-4>", self._on_mouse_scroll)
-        self.canvas.bind_all("<Button-5>", self._on_mouse_scroll)
-
-        # Configure the grid layout for the scrollable frame
-        self.scrollable_frame.grid_columnconfigure(0, weight=1)
-
-        # Add widgets to the scrollable frame
-        if label:
-            self.label = customtkinter.CTkLabel(self.scrollable_frame, text=label)
-            self.label.grid(row=0, column=0, padx=10, pady=10)
-        
-        if buttons:
-            for i in range(len(buttons)):
-                button = customtkinter.CTkButton(self.scrollable_frame, text=buttons[i], command=lambda b=buttons[i]: self.button_clicked(b))
-                button.grid(row=i+1, column=0, padx=10, pady=10)
-
-    def _on_mouse_scroll(self, event):
-        if event.delta:
-            self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
-        elif event.num == 4:
-            self.canvas.yview_scroll(-1, "units")
-        elif event.num == 5:
-            self.canvas.yview_scroll(1, "units")
-
-    def button_clicked(self, text) -> None:
-        if self.callback:
-            self.callback(text)
-        self.destroy()
 
 class AgentBase(ABC):
     def __init__(self, llm_models, es_models, state: GraphState, app, debug):
@@ -425,17 +358,13 @@ class ESNecessaryActionsSelector(AgentBase):
             IMPORTANT if the user has just request you to modify something without asking you to run the model, then
             you should assume you should only modify it. If the user actually wanted to run, he will ask later. \n
             
-            If the user specifies an action in the USER_INPUT and tells you to avoid any other action, only select
-            the action the user asked for. \n
-            
             There are two types of USER_INPUT:
             1. Gives you a direct command related to one or more of the available actions, such as asking you
             to modify a value, or to run a model, to plot some specific data, compare the already available
             results or consult details about the modeling process. In this case, you should only request the
             actions the user has asked;
             2. Gives you a scenario without specifying any command, asking for details about the scenario
-            for example. In this case you need to modify, run, analyze and plot the results to the user. This
-            instruction can be ignored if the user asks additionaly for specific actions. \n
+            for example. In this case you need to modify, run, analyze and plot the results to the user. \n
             
             You must output a JSON with the modified dictionary. \n
             
@@ -874,10 +803,14 @@ class RunModel(AgentBase):
                 # write the in-memory db to disk
                 disk_db_conn = sqlite3.connect(db_path)
                 conn.backup(disk_db_conn)
+                sim_status = 'runned'
                 result = 'The model has runned successfully!'
             except:
+                # TODO set a better way of defining infeasibility
+                sim_status = 'infeasible'
                 result = 'Something went wrong and the model has not completely runned.'
         else:
+            sim_status = 'no_run'
             result = 'There were no modifications to the model, no new simulation required'
             
         if self.debug:
@@ -886,6 +819,7 @@ class RunModel(AgentBase):
         action_history['run'] = 'done'
         self.state['action_history'] = action_history
         self.state['context'] = context + [result]
+        self.state['sim_status'] = sim_status
         self.state['num_steps'] = num_steps
         
         return self.state
@@ -1515,17 +1449,39 @@ class ConsultModel(AgentBase):
         
         return self.state
 
-# TODO add yearly comparison
-
 class CompareModel(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
+        return super().get_prompt_template()
+    
+    def get_analysis_type_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+                You are an specialist at checking the USER_INPUT to decide if the user wants to know the comparison
+                between the original model and the modified model, or if the user wants to check result variation
+                within different years of a single model. \n
+                
+                Your only output should be a JSON object with a single key 'type', that can be either 'model_diff'
+                or 'yearly_diff'. \n
+                
+                Always use double quotes in the JSON object. \n
+
+                <|eot_id|><|start_header_id|>user<|end_header_id|>
+                USER_INPUT: {user_input} \n
+                Answer:
+                <|eot_id|>
+                <|start_header_id|>assistant<|end_header_id|>
+                """,
+                input_variables=["user_input"],
+            )
+
+    def get_results_diff_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
                 You are an specialist at analyzing the variations in the model's output variables to summarize
                 the most relevant information given the USER_INPUT and the OUTPUT_VARIATIONS. \n
                 
                 OUTPUT_VARIATIONS is a dictionary that contains the percentual variation of the output variables
-                of a model after the user modified it and ran it again. The first layer is has the output variables
+                of a model after the user modified it and ran it again. The first layer has the output variables
                 as the key, the second has each year of the simulation as a key, and finally, the values of these
                 are the the variations for each subprocess (represented by a combination of 
                 'conversion_process'@'commodity_in'@'commodity_out'). \n
@@ -1549,84 +1505,97 @@ class CompareModel(AgentBase):
                 """,
                 input_variables=["user_input","output_variations","costs_variation"],
             )
-    
+
+    def get_yearly_diff_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+                You are an specialist at analyzing the variations in the model's output variables to summarize
+                the most relevant information given the USER_INPUT and the YEARLY_VARIATIONS. \n
+                
+                YEARLY_VARIATIONS is a dictionary that contains the percentual variation of the output variables
+                throughout the different years of the model results. The first layer has the output variables
+                as the key, the second has each conversion subprocess (represented by a combination of 
+                'conversion_process'@'commodity_in'@'commodity_out') of the simulation as a key, and finally,
+                the values of these are the the variations for each year. \n
+                
+                Using this context you should be able to give the user the main insights about the scenario
+                yearly results comparison that he requested. \n
+
+                <|eot_id|><|start_header_id|>user<|end_header_id|>
+                USER_INPUT: {user_input} \n
+                YEARLY_VARIATIONS: {yearly_variations} \n
+                Answer:
+                <|eot_id|>
+                <|start_header_id|>assistant<|end_header_id|>
+                """,
+                input_variables=["user_input","yearly_variations"],
+            )
+
     def execute(self) -> GraphState:
         self.helper.save_chat_status('Comparing results')
         user_input = self.state['consolidated_input']
         context = self.state['context']
         action_history = self.state['action_history']
+        sim_status = self.state['sim_status']
         num_steps = self.state['num_steps']
         num_steps += 1
 
-        runs_dir_path = './CESM/Runs'
-        simulation_base = 'DEModel-Base'
-        simulation_new = 'DEModelMock-Base'
-        fname_model = 'db.sqlite'
+        runs_dir_path = 'CESM/Runs'
+        
+        simulation_base = f'{self.base_model.split("/")[-1][:-5]}'
+        simulation_new = f'{self.mod_model.split("/")[-1][:-5]}'
+        # simulation_new = 'DEModelMock' # For debugging
 
-        db_path_base = os.path.join(runs_dir_path, simulation_base, fname_model)
-        db_path_new = os.path.join(runs_dir_path, simulation_new, fname_model)
-        conn_base = sqlite3.connect(db_path_base)
-        conn_new = sqlite3.connect(db_path_new)
-        dao_base = DAO(conn_base)
-        dao_new = DAO(conn_new)
-
+        # Set interest variables
         non_t_variables = ["Cap_new",
-                        "Cap_active",
-                        "Cap_res",
-                        "Eouttot",
-                        "Eintot",
-                        "E_storage_level_max"]
+                           "Cap_active",
+                           "Cap_res",
+                           "Eouttot",
+                           "Eintot",
+                           "E_storage_level_max"]
 
-        single_values = ["OPEX",
-                        "CAPEX",
-                        "TOTEX"]
+        cost_vars = ["OPEX",
+                     "CAPEX",
+                     "TOTEX"]
 
-        for idx, variable in enumerate(non_t_variables):
-            df_value_base = dao_base.get_as_dataframe(variable)
-            df_value_new = dao_new.get_as_dataframe(variable)
-            if idx == 0:
-                df_base = df_value_base.rename(columns={'value': variable})
-                df_new = df_value_new.rename(columns={'value': variable})
-            else:
-                df_base[variable] = df_value_base['value']
-                df_new[variable] = df_value_new['value']
+        df_base = self.helper.load_results(runs_dir_path, simulation_base, non_t_variables)
+        df_new = self.helper.load_results(runs_dir_path, simulation_new, non_t_variables)
+        df_costs_base = self.helper.load_results(runs_dir_path, simulation_base, cost_vars)
+        df_costs_new = self.helper.load_results(runs_dir_path, simulation_new, cost_vars)
 
-        for idx, variable in enumerate(single_values):
-            df_value_base = dao_base.get_as_dataframe(variable)
-            df_value_new = dao_new.get_as_dataframe(variable)
-            if idx == 0:
-                df_single_base = df_value_base.rename(columns={'value': variable})
-                df_single_new = df_value_new.rename(columns={'value': variable})
-            else:
-                df_single_base[variable] = df_value_base['value']
-                df_single_new[variable] = df_value_new['value']
-                
-        variations_single = (df_single_new / df_single_base - 1) * 100
+        # Fill missing years with zeroes so we can compare the dataframes correctly
+        # Doing that because the results can have different sets of CSs and years
+        df_base, df_new = self.helper.fill_empty_rows(df_base, df_new)
         
-        variations = ((df_new.iloc[:,4:] / df_base.iloc[:,4:] - 1) * 100).replace([np.inf, np.nan], 0).apply(np.int64)
-        df_variations = df_new.copy()
-        df_variations[non_t_variables] = variations[non_t_variables]
-        df_variations['cs'] = df_variations[['cp','cin','cout']].agg('@'.join, axis=1)
-        
-        years = np.unique(df_variations['Year'])
-        
-        variations_dict = {var: {year: [] for year in years} for var in non_t_variables}
+        if sim_status == 'runned':
+            prompt = self.get_analysis_type_prompt_template()
+            llm_chain = prompt | self.json_model | JsonOutputParser()
+            
+            llm_output = llm_chain.invoke({"user_input": user_input})
+            type = llm_output['type']
+        else:
+            type = 'yearly_diff'
 
-        for variable in non_t_variables:
-            for year in years:
-                for _, row in df_variations.loc[(df_variations['Year']==year) & (df_variations[variable]!=0)].iterrows():
-                    if row['cs'] == 'DEBUG@Dummy@DEBUG':
-                        continue
-                    entry = f'{row["cs"]} = {min(row[variable], 500)}'
-                    variations_dict[variable][year].append(entry)
-        
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.ht_model | StrOutputParser()
+        # TODO implement verification of status beyond runned ('infeasible', 'failed', 'no_run')
+        if type == 'model_diff':
+            variations_costs = (df_costs_new / df_costs_base - 1) * 100
+            variations_dict = self.helper.get_models_variation(df_base, df_new, non_t_variables)
 
-        llm_output = llm_chain.invoke({"user_input": user_input, "output_variations": variations_dict, "costs_variation": variations_single})
-        
+            prompt = self.get_results_diff_prompt_template()
+            llm_chain = prompt | self.ht_model | StrOutputParser()
+
+            llm_output = llm_chain.invoke({"user_input": user_input, "output_variations": variations_dict, "costs_variation": variations_costs})
+        else:
+            variations_dict = self.helper.get_yearly_variations_from_results(df_base, non_t_variables)
+            
+            prompt = self.get_yearly_diff_prompt_template()
+            llm_chain = prompt | self.ht_model | StrOutputParser()
+
+            llm_output = llm_chain.invoke({"user_input": user_input, "yearly_variations": variations_dict})
+
         if self.debug:
             self.helper.save_debug("---COMPARE RESULTS---")
+            self.helper.save_debug(f'ANALYSIS TYPE: {type}')
             self.helper.save_debug(f'ANALYSIS: {llm_output}\n')
         
         self.state['context'] = context + [llm_output]

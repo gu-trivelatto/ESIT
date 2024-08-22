@@ -2,6 +2,11 @@ import math
 import pickle
 import pandas as pd
 from abc import ABC
+import sqlite3
+from CESM.core.data_access import DAO
+import os
+import numpy as np
+import pandas as pd
 
 class HelperFunctions(ABC):
     def __init__(self):
@@ -231,6 +236,193 @@ class HelperFunctions(ABC):
                         result = result + [f'{param_name} of {cs_name} modified from {old_value} to {new_value} ({unit})']
                 
         return workbook, result
+    
+    def load_results(self, runs_dir_path, sim_name, variables):
+    # Instantiate access to the result DBs (base and new)
+        sim_name = f'{sim_name}-Base'
+        db_path = os.path.join(runs_dir_path, sim_name, 'db.sqlite')
+        conn = sqlite3.connect(db_path)
+        dao = DAO(conn)
+
+        # Populate the result dataframes from the DB
+        for idx, variable in enumerate(variables):
+            df_value = dao.get_as_dataframe(variable)
+            if idx == 0:
+                df = df_value.rename(columns={'value': variable})
+            else:
+                df[variable] = df_value['value']
+        
+        return df
+
+    def fill_empty_rows(self, df_base, df_new):
+        # Creates a column for aggregated cs names
+        df_base['cs'] = df_base[['cp','cin','cout']].agg('@'.join, axis=1)
+        df_new['cs'] = df_new[['cp','cin','cout']].agg('@'.join, axis=1)
+
+        # Get the list of CSs of each dataframe keeping the original order
+        base_cs, index = np.unique(df_base['cs'], return_index=True)
+        base_cs = list(base_cs[index.argsort()])
+        new_cs, index = np.unique(df_new['cs'], return_index=True)
+        new_cs = list(new_cs[index.argsort()])
+
+        # Creates the output dataframes from the original ones
+        full_df_base = df_base.copy()
+        full_df_new = df_new.copy()
+
+        base_cs_y = {}
+        new_cs_y = {}
+
+        # Gets the available years for each CS of each dataframe
+        for cs in base_cs:
+            base_cs_y[cs] = df_base['Year'].loc[df_base['cs'] == cs].tolist()
+        for cs in new_cs:
+            new_cs_y[cs] = df_new['Year'].loc[df_new['cs'] == cs].tolist()
+
+        # Get the differences between the dataframes
+        diff_base_new = [item for item in base_cs if item not in new_cs]
+        diff_new_base = [item for item in new_cs if item not in base_cs]
+
+        # Iterates over the differences between the new and the old results
+        # to add the missing entries
+        for diff in reversed(diff_new_base):
+            previous_cs = df_new['cs'].iloc[(df_new['cs'] == diff).idxmax()-1]
+            cp, cin, cout = diff.split('@')
+
+            # Adds each available year for the missing CS
+            for year in reversed(new_cs_y[diff]):
+                full_df_base.loc[(df_base.loc[::-1,'cs'] == previous_cs).idxmax()+0.5] = cp, cin, cout, year, 0, 0, 0, 0, 0, 0, diff
+                full_df_base = full_df_base.sort_index().reset_index(drop=True)
+
+        # Iterates over the differences between the old and the new results
+        # to add the missing entries
+        for diff in reversed(diff_base_new):
+            previous_cs = df_base['cs'].iloc[(df_base['cs'] == diff).idxmax()-1]
+            cp, cin, cout = diff.split('@')
+
+            # Adds each available year for the missing CS
+            for year in reversed(base_cs_y[diff]):
+                full_df_new.loc[(df_new.loc[::-1,'cs'] == previous_cs).idxmax()+0.5] = cp, cin, cout, year, 0, 0, 0, 0, 0, 0, diff
+                full_df_new = full_df_new.sort_index().reset_index(drop=True)
+
+        # Starts iteration over the merged results to fill the missing years of everything
+        for i in range(len(full_df_base)-2, 0, -1):
+            cs = full_df_base.loc[i,'cs']
+            year = full_df_base.loc[i,'Year']
+            cp, cin, cout = cs.split('@')
+            # Border case where we have a new CS but the previous didn't go until 2015
+            if (cs != full_df_base.loc[i+1,'cs']) and (full_df_base.loc[i+1,'Year'] != 2015):
+                while full_df_base.loc[i+1,'Year'] != 2015:
+                    new_year = full_df_base.loc[i+1,'Year']-5
+                    full_df_base.loc[i + 0.5] = cp, cin, cout, new_year, 0, 0, 0, 0, 0, 0, full_df_base.loc[i+1,'cs']
+                    full_df_base = full_df_base.sort_index().reset_index(drop=True)
+            # Border case where we have a new CS but the current doesn't go until 2060
+            if (cs != full_df_base.loc[i+1,'cs']) and (year != 2060):
+                counter = 0
+                while full_df_base.loc[i+1,'Year'] != year+5:
+                    new_year = 2060 - counter*5
+                    full_df_base.loc[i + 0.5] = cp, cin, cout, new_year, 0, 0, 0, 0, 0, 0, cs
+                    full_df_base = full_df_base.sort_index().reset_index(drop=True)
+                    counter += 1
+            # Inner case where the current CS skips years, this will fill the inner gaps
+            if (cs == full_df_base.loc[i+1,'cs']) and (year != full_df_base.loc[i+1,'Year']-5):
+                while year != full_df_base.loc[i+1,'Year']-5:
+                    new_year = full_df_base.loc[i+1,'Year']-5
+                    full_df_base.loc[i + 0.5] = cp, cin, cout, new_year, 0, 0, 0, 0, 0, 0, cs
+                    full_df_base = full_df_base.sort_index().reset_index(drop=True)
+
+        # Starts iteration over the merged results to fill the missing years of everything
+        for i in range(len(full_df_new)-2, 0, -1):
+            cs = full_df_new.loc[i,'cs']
+            year = full_df_new.loc[i,'Year']
+            cp, cin, cout = cs.split('@')
+            # Border case where we have a new CS but the previous didn't go until 2015
+            if (cs != full_df_new.loc[i+1,'cs']) and (full_df_new.loc[i+1,'Year'] != 2015):
+                while full_df_new.loc[i+1,'Year'] != 2015:
+                    new_year = full_df_new.loc[i+1,'Year']-5
+                    full_df_new.loc[i + 0.5] = cp, cin, cout, new_year, 0, 0, 0, 0, 0, 0, full_df_new.loc[i+1,'cs']
+                    full_df_new = full_df_new.sort_index().reset_index(drop=True)
+            # Border case where we have a new CS but the current doesn't go until 2060
+            if (cs != full_df_new.loc[i+1,'cs']) and (year != 2060):
+                counter = 0
+                while full_df_new.loc[i+1,'Year'] != year+5:
+                    new_year = 2060 - counter*5
+                    full_df_new.loc[i + 0.5] = cp, cin, cout, new_year, 0, 0, 0, 0, 0, 0, cs
+                    full_df_new = full_df_new.sort_index().reset_index(drop=True)
+                    counter += 1
+            # Inner case where the current CS skips years, this will fill the inner gaps
+            if (cs == full_df_new.loc[i+1,'cs']) and (year != full_df_new.loc[i+1,'Year']-5):
+                while year != full_df_new.loc[i+1,'Year']-5:
+                    new_year = full_df_new.loc[i+1,'Year']-5
+                    full_df_new.loc[i + 0.5] = cp, cin, cout, new_year, 0, 0, 0, 0, 0, 0, cs
+                    full_df_new = full_df_new.sort_index().reset_index(drop=True)
+        
+        # Returns the filled dataframes
+        return full_df_base, full_df_new
+
+    def get_models_variation(self, df_base, df_new, variables):
+        years = np.unique(df_base['Year'])
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            variations = ((df_new.iloc[:,4:-1] / df_base.iloc[:,4:-1] - 1) * 100)
+        zero_to_val_idx = (df_new.iloc[:,4:-1] != 0) & (df_base.iloc[:,4:-1] == 0)
+        val_to_zero_idx = (df_new.iloc[:,4:-1] == 0) & (df_base.iloc[:,4:-1] != 0)
+        zero_to_zero_idx = (df_new.iloc[:,4:-1] == 0) & (df_base.iloc[:,4:-1] == 0)
+        variations = variations.apply(np.int64)
+
+        variations[zero_to_val_idx] = np.inf
+        variations[val_to_zero_idx] = np.nan
+        variations[zero_to_zero_idx] = 0
+
+        df_variations = df_new.copy()
+        df_variations[variables] = variations[variables]
+        df_variations['cs'] = df_variations[['cp','cin','cout']].agg('@'.join, axis=1)
+        
+        variations_dict = {var: {year: [] for year in years} for var in variables}
+
+        for variable in variables:
+            for year in years:
+                for idx, row in df_variations.loc[(df_variations['Year']==year) & (df_variations[variable]!=0)].iterrows():
+                    if row['cs'] == 'DEBUG@Dummy@DEBUG':
+                        continue
+                    if row[variable] == np.nan:
+                        entry = f'{row["cs"]} = -100%'
+                    elif row[variable] == np.inf:
+                        entry = f'{row["cs"]} = from 0 to {df_new.loc[idx, [variable]].values[0]:.2f}'
+                    else:
+                        entry = f'{row["cs"]} = {min(row[variable], 500):.2f}%'
+                    variations_dict[variable][year].append(entry)
+        
+        return variations_dict
+
+    def get_yearly_variations_from_results(self, df, variables):
+        df_variations = df.copy()
+        df_variations['Year'] = df_variations['Year'].astype(str)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            for i in range(len(df)-1, 0, -1):
+                if df.loc[i, 'cs'] == df.loc[i-1, 'cs']:
+                    year_after = df.loc[i, 'Year']
+                    year_before = df.loc[i-1, 'Year']
+                    df_variations.iloc[i:i+1,4:-1] = (df.iloc[i:i+1,4:-1].values / df.iloc[i-1:i,4:-1].values - 1) * 100
+                    df_variations.loc[i, 'Year'] = f'{year_before} to {year_after}'
+                else:
+                    continue
+        
+        variations_dict = {var: {} for var in variables}
+
+        for variable in variables:
+            for idx, row in df_variations.loc[(df_variations[variable].notna())].iterrows():
+                if (row['cs'] == 'DEBUG@Dummy@DEBUG') or (len(row['Year']) == 4):
+                    continue
+                if row[variable] == np.inf:
+                    entry = f'{row["Year"]} = from 0 to {df.loc[idx, [variable]].values[0]:.2f}'
+                else:
+                    entry = f'{row["Year"]} = {min(row[variable], 500):.2f}%'
+                if row['cs'] in variations_dict[variable].keys():
+                    variations_dict[variable][row['cs']].append(entry)
+                else:
+                    variations_dict[variable][row['cs']] = [entry]
+                    
+        return variations_dict
     
     def save_history(self, history):
         with open("metadata/chat_history.pkl", "wb") as f:
