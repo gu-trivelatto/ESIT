@@ -422,16 +422,20 @@ class ESNecessaryActionsSelector(AgentBase):
             of the new results to the user, and 'consult' to check details regarding the construction of the model
             (not the details of de modeling values or results, only the theory behind the model). \n
             
+            IMPORTANT if the user has just request you to modify something without asking you to run the model, then
+            you should assume you should only modify it. If the user actually wanted to run, he will ask later. \n
+            
+            If the user specifies an action in the USER_INPUT and tells you to avoid any other action, only select
+            the action the user asked for. \n
+            
             There are two types of USER_INPUT:
             1. Gives you a direct command related to one or more of the available actions, such as asking you
             to modify a value, or to run a model, to plot some specific data, compare the already available
             results or consult details about the modeling process. In this case, you should only request the
             actions the user has asked;
             2. Gives you a scenario without specifying any command, asking for details about the scenario
-            for example. In this case you need to modify, run, analyze and plot the results to the user. \n
-            
-            IMPORTANT if the user is just request you to modify something without asking you to run the model, then
-            you should assume you should only modify it. If the user actually wanted to run, he will ask later. \n
+            for example. In this case you need to modify, run, analyze and plot the results to the user. This
+            instruction can be ignored if the user asks additionaly for specific actions. \n
             
             You must output a JSON with the modified dictionary. \n
             
@@ -805,8 +809,6 @@ class Calculator(AgentBase):
         
         return self.state
 
-# TODO review the usage of 'final_answer'
-
 class RunModel(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return super().get_prompt_template()
@@ -814,68 +816,77 @@ class RunModel(AgentBase):
     def execute(self) -> GraphState:
         self.helper.save_chat_status('Running model')
         action_history = self.state['action_history']
+        context = self.state['context']
+        model_modified = self.state['model_modified']
         num_steps = self.state['num_steps']
         num_steps += 1
         
         if self.debug:
             self.helper.save_debug('---SIMULATION RUNNER---')
         
-        try:
-            model_name = self.mod_model.split('/')[-1]
-            model_name = model_name[:-5]
-            scenario = 'Base'
-            techmap_dir_path = Path("./CESM").joinpath('Data', 'Techmap')
-            ts_dir_path = Path("./CESM").joinpath('Data', 'TimeSeries')
-            runs_dir_path = Path("./CESM").joinpath('Runs')
+        if model_modified:
+            try:
+                model_name = self.mod_model.split('/')[-1]
+                model_name = model_name[:-5]
+                scenario = 'Base'
+                techmap_dir_path = Path("./CESM").joinpath('Data', 'Techmap')
+                ts_dir_path = Path("./CESM").joinpath('Data', 'TimeSeries')
+                runs_dir_path = Path("./CESM").joinpath('Runs')
+                
+                # Create a directory for the model if it does not exist
+                db_dir_path = runs_dir_path.joinpath(model_name+'-'+scenario)
+                if not runs_dir_path.exists():
+                    os.mkdir(runs_dir_path)
+                
+                if not os.path.exists(db_dir_path):
+                    os.mkdir(db_dir_path)
+
+                # Create and Run the model
+                conn = sqlite3.connect(":memory:")
+                parser = Parser(model_name, techmap_dir_path=techmap_dir_path, ts_dir_path=ts_dir_path, db_conn = conn, scenario = scenario)
+
+                # Parse
+                if self.debug:
+                    self.helper.save_debug("\n#-- Parsing started --#")
+                parser.parse()
+
+                # Build
+                if self.debug:
+                    self.helper.save_debug("\n#-- Building model started --#")
+                model_instance = Model(conn=conn)
+
+                # Solve
+                if self.debug:
+                    self.helper.save_debug("\n#-- Solving model started --#")
+                model_instance.solve()
+
+                # Save
+                if self.debug:
+                    self.helper.save_debug("\n#-- Saving model started --#")
+                model_instance.save_output()
+
+                
+                db_path = db_dir_path.joinpath('db.sqlite')
+                if db_path.exists():
+                    # Delete the file using unlink()
+                    db_path.unlink()
+                
+                # write the in-memory db to disk
+                disk_db_conn = sqlite3.connect(db_path)
+                conn.backup(disk_db_conn)
+                result = 'The model has runned successfully!'
+            except:
+                result = 'Something went wrong and the model has not completely runned.'
+        else:
+            result = 'There were no modifications to the model, no new simulation required'
             
-            # Create a directory for the model if it does not exist
-            db_dir_path = runs_dir_path.joinpath(model_name+'-'+scenario)
-            if not runs_dir_path.exists():
-                os.mkdir(runs_dir_path)
-            
-            if not os.path.exists(db_dir_path):
-                os.mkdir(db_dir_path)
-
-            # Create and Run the model
-            conn = sqlite3.connect(":memory:")
-            parser = Parser(model_name, techmap_dir_path=techmap_dir_path, ts_dir_path=ts_dir_path, db_conn = conn, scenario = scenario)
-
-            # Parse
-            if self.debug:
-                self.helper.save_debug("\n#-- Parsing started --#")
-            parser.parse()
-
-            # Build
-            if self.debug:
-                self.helper.save_debug("\n#-- Building model started --#")
-            model_instance = Model(conn=conn)
-
-            # Solve
-            if self.debug:
-                self.helper.save_debug("\n#-- Solving model started --#")
-            model_instance.solve()
-
-            # Save
-            if self.debug:
-                self.helper.save_debug("\n#-- Saving model started --#")
-            model_instance.save_output()
-
-            
-            db_path = db_dir_path.joinpath('db.sqlite')
-            if db_path.exists():
-                # Delete the file using unlink()
-                db_path.unlink()
-            
-            # write the in-memory db to disk
-            disk_db_conn = sqlite3.connect(db_path)
-            conn.backup(disk_db_conn)
-            result = 'The model has runned successfully!'
-        except:
-            result = 'Something went wrong and the model has not completely runned.'
+        if self.debug:
+            self.helper.save_debug(f'{result}\n')
         
         action_history['run'] = 'done'
-        self.state['num_steps'] = num_steps
         self.state['action_history'] = action_history
+        self.state['context'] = context + [result]
+        self.state['num_steps'] = num_steps
         
         return self.state
 
@@ -1174,40 +1185,43 @@ class ModifyModel(AgentBase):
             else:
                 action_history['modify'] = 'repeat'
         else:
-            # Defines the type of parametrization (defined or undefined)
-            parametrization_type = params_general_chain.invoke({"user_input": user_input})
-            parametrization_type = parametrization_type['parametrization_type']
+            try:
+                # Defines the type of parametrization (defined or undefined)
+                parametrization_type = params_general_chain.invoke({"user_input": user_input})
+                parametrization_type = parametrization_type['parametrization_type']
 
-            # Selects the conversion subprocesses that match the user input
-            cs_selection = select_cs_chain.invoke({"user_input": user_input, "cs_list": CSs})
-            cs_selection = cs_selection['cs_selection']
+                # Selects the conversion subprocesses that match the user input
+                cs_selection = select_cs_chain.invoke({"user_input": user_input, "cs_list": CSs})
+                cs_selection = cs_selection['cs_selection']
 
-            if parametrization_type == 'defined':
-                # Set the available parameters as being all of them for each conversion subprocess
-                available_parameters = {cs: params for cs in cs_selection}
-            else:
-                # Set the available parameters as being only the ones that are already filled for each cs
-                available_parameters = helper.get_populated_params_and_cs_list(self.base_model, cs_selection)
-
-            # Selects the matching parameter from the set of available ones
-            param_selection = select_params_chain.invoke({"user_input": user_input, "param_list": available_parameters})
-            param_selection = param_selection['param_selection']
-
-            # Gets the current values for the selected pairs of cs and parameter
-            current_values = helper.get_values(self.base_model, param_selection)
-
-            # Feed the current data to the model, it will output the updated values in the same format
-            new_params = new_values_chain.invoke({"user_input": user_input, "context": context, "current_values": current_values})
-            
-            # IF the agent indicates that the modification was successfull, then apply them to the sheet
-            if new_params['success']:
-                workbook, result = helper.modify_cs_sheet(workbook, new_params)
-                if len(result) == 0:
-                    message = 'Nothing was modified'
+                if parametrization_type == 'defined':
+                    # Set the available parameters as being all of them for each conversion subprocess
+                    available_parameters = {cs: params for cs in cs_selection}
                 else:
-                    message = f'The model was modified as follows:{result}'
-            else:
-                message = ['Failed to generate the correct modified set of parameters.']
+                    # Set the available parameters as being only the ones that are already filled for each cs
+                    available_parameters = helper.get_populated_params_and_cs_list(self.base_model, cs_selection)
+
+                # Selects the matching parameter from the set of available ones
+                param_selection = select_params_chain.invoke({"user_input": user_input, "param_list": available_parameters})
+                param_selection = param_selection['param_selection']
+
+                # Gets the current values for the selected pairs of cs and parameter
+                current_values = helper.get_values(self.base_model, param_selection)
+
+                # Feed the current data to the model, it will output the updated values in the same format
+                new_params = new_values_chain.invoke({"user_input": user_input, "context": context, "current_values": current_values})
+                
+                # IF the agent indicates that the modification was successfull, then apply them to the sheet
+                if new_params['success']:
+                    workbook, result = helper.modify_cs_sheet(workbook, new_params)
+                    if len(result) == 0:
+                        message = 'Nothing was modified'
+                    else:
+                        message = f'The model was modified as follows:{result}'
+                else:
+                    message = ['Failed to generate the correct modified set of parameters.']
+            except:
+                message = ['Failed to modify the model, probably nothing to change']
             
             action_history['modify'] = 'done'
                         
@@ -1501,6 +1515,8 @@ class ConsultModel(AgentBase):
         
         return self.state
 
+# TODO add yearly comparison
+
 class CompareModel(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
@@ -1622,42 +1638,92 @@ class CompareModel(AgentBase):
 
 class PlotModel(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
+        return super().get_prompt_template()
+    
+    def get_select_plot_prompt_template(self) -> PromptTemplate:
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
             You are an specialist at deciding the correct type of plot to show to the user
             based on simulation results that we have access. \n
             
             Based on the USER_INPUT you should either identify the plot requested by the user
-            directly, or try to guess the correct ones if the USER_INPUT is a bit more generic
+            directly, or decide the correct ones if the USER_INPUT is a bit more generic
             and don't specify any plot. \n
             
             To help you, you have access to a list called AVAILABLE_PLOTS where you have all
-            plotting possibilities. Each of the sublists is a type of plot that you can request,
-            some of them have elements show as REQUIRED, that means that they need extra information
-            to the plot to work. The format of the sublists is ['plot_type', 'plot_subtype', 'commodity', 'year']
-            and you can find the possibilities for commodity and year in COMMODITIES AND YEARS. 
-            They MUST be filled in the plots that have them as REQUIRED. If it's not required you
-            can keep the values empty. \n
+            plotting possibilities. Each of the sublists is formated as ['plot_type', 'plot_subtype']
+            and represents a single plot. They are not interchangeable, a plot type is always tied to
+            it's plot subtype. You must only select the required sublists, never modify or mix them. \n
             
             You must output a JSON object containing a single key 'plots'. The value of this key
             will be a list of lists, where each sublist consists of a plot selection. The format of
-            the sublists is ['plot_type', 'plot_subtype', 'commodity', 'year'], it must stay in this
-            exact order. \n
-            
-            All commodities and years that you select MUST be in COMMODITIES and YEARS, you are not
-            allowed to guess any of them, since the tool cannot plot data for inexistent commodities
-            or years. \n
+            the sublists is ['plot_type', 'plot_subtype'], it must stay in this exact order. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
             AVAILABLE_PLOTS: {available_plots} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input","available_plots"],
+        )
+        
+    def get_select_commodity_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are an specialist at deciding the correct commodities for each type of plot
+            based on the USER_INPUT. \n
+            
+            You will receive some plot selections in PLOT_SELECTIONS, and you need to select at
+            least one commodity for each of them to be plotted. The available commodities are in
+            COMMODITIES. \n
+            
+            You must output a JSON object containing a single key 'commodities'. The value of this key
+            will be a list of lists, where each sublist consists of a list of selected commodities (it
+            should contain at least one entry). The final list must contain one sublist for each entry
+            in PLOT_SELECTIONS. \n
+            
+            All commodities that you select MUST be in COMMODITIES, you are not allowed to guess any
+            of them or modify the way they are written, since the tool cannot plot data for inexistent
+            commodities. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            PLOT_SELECTIONS: {plot_selections} \n
             COMMODITIES: {commodities} \n
+            Answer:
+            <|eot_id|>
+            <|start_header_id|>assistant<|end_header_id|>
+            """,
+            input_variables=["user_input","plot_selections","commodities"],
+        )
+        
+    def get_select_year_prompt_template(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            You are an specialist at deciding the correct year to plot the selected plots. \n
+            
+            Based on the USER_INPUT and on the PLOT_SELECTIONS, you should select at least one
+            year for that plot to be plotted. The available years are in YEARS. \n
+            
+            You must output a JSON object containing a single key 'years'. The value of this key
+            will be a list of lists, where each sublist consists of a list of selected years (it
+            should contain at least one entry). The final list must contain one sublist for each entry
+            in PLOT_SELECTIONS. \n
+            
+            All years that you select MUST be in YEARS, you are not allowed to guess any of them or
+            modify the way they are written, since the tool cannot plot data for inexistent years. \n
+
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            USER_INPUT: {user_input} \n
+            PLOT_SELECTIONS: {plot_selections} \n
             YEARS: {years} \n
             Answer:
             <|eot_id|>
             <|start_header_id|>assistant<|end_header_id|>
             """,
-            input_variables=["user_input","available_plots","commodities","years"],
+            input_variables=["user_input","plot_selections","years"],
         )
     
     def execute(self) -> GraphState:
@@ -1667,10 +1733,15 @@ class PlotModel(AgentBase):
         context = self.state['context']
         num_steps = self.state['num_steps']
         num_steps += 1
-        
-        prompt = self.get_prompt_template()
-        llm_chain = prompt | self.json_model | JsonOutputParser()
-        
+
+        select_plot_prompt = self.get_select_plot_prompt_template()
+        select_commodity_prompt = self.get_select_commodity_prompt_template()
+        select_year_prompt = self.get_select_year_prompt_template()
+
+        select_plot_chain = select_plot_prompt | self.json_model | JsonOutputParser()
+        select_commodity_chain = select_commodity_prompt | self.json_model | JsonOutputParser()
+        select_year_chain = select_year_prompt | self.json_model | JsonOutputParser()
+
         runs_dir_path = 'CESM/Runs'
         simulation = f'{self.base_model.split("/")[-1][:-5]}-Base'
 
@@ -1679,46 +1750,84 @@ class PlotModel(AgentBase):
         dao = DAO(conn)
         plotter = Plotter(dao)
 
-        available_plots = [['Bar', 'ENERGY_CONSUMPTION', 'REQUIRED', ''],
-                           ['Bar', 'ENERGY_PRODUCTION', 'REQUIRED', ''],
-                           ['Bar', 'ACTIVE_CAPACITY', 'REQUIRED', ''],
-                           ['Bar', 'NEW_CAPACITY', 'REQUIRED', ''],
-                           ['Bar', 'CO2_EMISSION', '', ''],
-                           ['Bar', 'PRIMARY_ENERGY', '', ''],
-                           ['TimeSeries', 'ENERGY_CONSUMPTION', 'REQUIRED', 'REQUIRED'],
-                           ['TimeSeries','ENERGY_PRODUCTION', 'REQUIRED', 'REQUIRED'],
-                           ['TimeSeries','POWER_CONSUMPTION', 'REQUIRED', 'REQUIRED'],
-                           ['TimeSeries','POWER_PRODUCTION', 'REQUIRED', 'REQUIRED'],
-                           ['Sankey', 'SANKEY', '', 'REQUIRED'],
-                           ['SingleValue', 'CAPEX', '', ''],
-                           ['SingleValue', 'OPEX', '', ''],
-                           ['SingleValue', 'TOTEX', '', '']]
+        available_plots = [['Bar', 'ENERGY_CONSUMPTION'],
+                            ['Bar', 'ENERGY_PRODUCTION'],
+                            ['Bar', 'ACTIVE_CAPACITY'],
+                            ['Bar', 'NEW_CAPACITY'],
+                            ['Bar', 'CO2_EMISSION'],
+                            ['Bar', 'PRIMARY_ENERGY'],
+                            ['TimeSeries', 'ENERGY_CONSUMPTION'],
+                            ['TimeSeries','ENERGY_PRODUCTION'],
+                            ['TimeSeries','POWER_CONSUMPTION'],
+                            ['TimeSeries','POWER_PRODUCTION'],
+                            ['Sankey', 'SANKEY'],
+                            ['SingleValue', 'CAPEX'],
+                            ['SingleValue', 'OPEX'],
+                            ['SingleValue', 'TOTEX']]
             
         commodities = [str(c) for c in dao.get_set("commodity")]
         commodities.remove('Dummy')
 
         years = [int(y) for y in dao.get_set("year")]
 
-        output = llm_chain.invoke({"user_input": user_input,
-                                   "available_plots": available_plots,
-                                   "commodities": commodities,
-                                   "years": years})
-
+        output = select_plot_chain.invoke({"user_input": user_input,
+                                            "available_plots": available_plots})
         selected_plots = output['plots']
+
+        final_plots = []
+        need_commodity_plots = []
+        need_year_plots = []
+        for plot in selected_plots:
+            if plot[0] == 'Sankey':
+                need_year_plots.append(plot + ['NO_COMMODITY'])
+            if plot[0] == 'SingleValue' or plot[1] in ['CO2_EMISSION', 'PRIMARY_ENERGY']:
+                final_plots.append(plot)
+            else:
+                need_commodity_plots.append(plot)
+
+        output = select_commodity_chain.invoke({"user_input": user_input,
+                                                "plot_selections": need_commodity_plots,
+                                                "commodities": commodities})
+        selected_commodities = output['commodities']
+
+        for plot, commodities in zip(need_commodity_plots, selected_commodities):
+            for commodity in commodities:
+                if plot[0] == 'TimeSeries':
+                    need_year_plots.append(plot + [commodity])
+                else:
+                    final_plots.append(plot + [commodity])
+
+        output = select_year_chain.invoke({"user_input": user_input,
+                                            "plot_selections": need_year_plots,
+                                            "years": years})
+
+        selected_years = output['years']
+        for plot, years in zip(need_year_plots, selected_years):
+            for year in years:
+                if len(plot) == 3:
+                    final_plots.append(plot + [year])
+                else:
+                    final_plots.append(plot + ['', year])
+                
         successful_plots = False
-        
+
         if self.debug:
             self.helper.save_debug('---PLOT RESULTS---')
             self.helper.save_debug(f'SELECTED PLOTS: {selected_plots}\n')
 
-        for plot in selected_plots:
+        for plot in final_plots:
             plot_type = plot[0]
             plot_subtype = plot[1]
-            commodity = plot[2]
-            year = plot[3]
-            
-            if not(commodity in commodities) or not(year in years):
-                continue
+            if len(plot) == 3:
+                commodity = plot[2]
+                if not(commodity in commodities) and not(commodity == 'NO_COMMODITY'):
+                    print(f'{commodity} not in {commodities}')
+                    continue
+            if len(plot) == 4:
+                year = plot[3]
+                if not(year in years):
+                    print(f'{year} not in {years}')
+                    continue
             
             try:
                 p_type = getattr(PlotType, plot_type)
@@ -1743,7 +1852,7 @@ class PlotModel(AgentBase):
                 successful_plots = True
             except:
                 pass
-        
+            
         if successful_plots:
             message = """
             The requested data was successfully plotted and shown to the user, there is no need to try to manipulate any
@@ -1762,7 +1871,7 @@ class PlotModel(AgentBase):
         self.state['action_history'] = action_history
         self.state['context'] = context + [message]
         
-        return self.state
+        return self.state 
 
 # TODO the outputs should also indicate if the model was runned etc...
     

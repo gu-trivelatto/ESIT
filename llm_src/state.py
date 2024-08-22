@@ -39,6 +39,7 @@ class GraphState(TypedDict):
     action_history: dict
     next_action: str
     retrieval_type: str
+    model_modified: str
     model_info: List[str]
     final_answer: str
     
@@ -60,6 +61,7 @@ class GraphState(TypedDict):
             action_history={'modify': 'no', 'run': 'no', 'compare': 'no', 'plot': 'no', 'consult': 'no'},
             next_action="",
             retrieval_type="",
+            model_modified=False,
             model_info=[],
             final_answer=""
         )
