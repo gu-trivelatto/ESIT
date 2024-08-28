@@ -11,7 +11,7 @@ from CESM.core.data_access import DAO
 
 class HelperFunctions(ABC):
     def __init__(self):
-        pass
+        self.debug_log_path = 'metadata/debug.log'
 
     def get_params_and_cs_list(self, techmap_file):
         tmap = pd.ExcelFile(techmap_file)
@@ -425,15 +425,29 @@ class HelperFunctions(ABC):
                     
         return variations_dict
     
+    # TODO fix memory to provide only the past 5 interactions to the user
+    
     def save_history(self, history):
         with open("metadata/chat_history.pkl", "wb") as f:
             pickle.dump(history, f)
     
     def save_debug(self, debug_string):
         print(debug_string)
-        with open('metadata/debug.log', 'a') as f:
+        with open(self.debug_log_path, 'a') as f:
             f.write(f'{str(debug_string)}\n')
             
+    def get_debug_log_path(self):
+        return self.debug_log_path
+    
     def save_chat_status(self, status):
         with open('metadata/status.log', 'w') as f:
             f.write(status)
+            
+    def save_simulation_status(self, status):
+        with open('metadata/simulation_status.log', 'w') as f:
+            f.write(status)
+            
+    def get_simulation_status(self):
+        with open('metadata/simulation_status.log', 'r') as f:
+            status = f.read()
+        return status

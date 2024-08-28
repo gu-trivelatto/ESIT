@@ -1,6 +1,6 @@
 import os
+import sys
 import sqlite3
-import tkinter as tk
 
 from pathlib import Path
 from datetime import datetime
@@ -145,8 +145,8 @@ class InputTranslator(AgentBase):
         
         if self.debug:
             self.helper.save_debug("---TRANSLATE INPUT---")
-            self.helper.save_debug(f'ORIGINAL INPUT:{user_input.rstrip()}')
-            self.helper.save_debug(f'SOURCE LANGUAGE:{source_language}')
+            self.helper.save_debug(f'ORIGINAL INPUT: {user_input.rstrip()}')
+            self.helper.save_debug(f'SOURCE LANGUAGE: {source_language}')
             if source_language.lower() != 'english':
                 self.helper.save_debug(f'TRANSLATED INPUT:{translated_user_input.rstrip()}\n')
         
@@ -161,26 +161,18 @@ class ToolBypasser(AgentBase):
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
             You are part of the Energy System Insight Tool (ESIT), you are responsible for checking
-            if the user trying to have a simple conversation with the tool instead of search for
+            if the user trying to have a simple interaction with the tool instead of search for
             information or manipulate the model. \n
 
             Considering the USER_INPUT you should decide whether to route
             the user to the tool or simply bypass it to generate a simple answer to the user. \n
             
-            The tool you are able to bypass can do the following:
-            - Discover information about date and time;
-            - Search the web for information;
-            - Solve any mathematical problem;
-            - Solve any type of manipulation to the model;
-            - Consult any information about the model;
-            You should only bypass the tool if you think the user request don't need any of these. \n
-            
-            Restrain yourself to bypassing simple interactions only, if there is any complexity
-            involving the necessary answer, simply route to the tool. If the USER_INPUT says something
-            about trying again, or running something again, or doing something again in any sense, 
-            route the pipeline to the tool, never to the output. \n
-            
-            NEVER BYPASS ANY INPUT THAT SAYS THINGS RELATED TO ENERGY SYSTEM MODELING! \n
+            The cases where you will bypass to the output are when USER_INPUT contains:
+            - 'Hello!' or similars, without anything else;
+            - 'How are you?' or similars, without anything else;
+            - 'Who are you?' or similars;
+            - 'What do you do?' or similars;
+            - 'Thank you!' or similars;
             
             You must output a JSON with a single key 'is_conversation' containing exclusivelly the 
             selected type, which can be either true or false (use full lowercase for the boolean). \n
@@ -190,7 +182,7 @@ class ToolBypasser(AgentBase):
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT : {user_input} \n
             <|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-            input_variables=["user_input","history"],
+            input_variables=["user_input"],
         )
     
     def execute(self) -> GraphState:
@@ -350,21 +342,42 @@ class ESNecessaryActionsSelector(AgentBase):
             dictionary to select the actions to take. You'll receive all actions as 'no', to select an action
             simply change that to 'yes', the rest of the pipeline will take care of executing them. \n
             
-            The actions are 'modify' to modify the model, 'run' to run the modified model, 'compare' to
-            compare the original results with the ones of the modified model, 'plot' to show the visualization
-            of the new results to the user, and 'consult' to check details regarding the construction of the model
-            (not the details of de modeling values or results, only the theory behind the model). \n
+            The available actions are:
+            'modify' - Whenever the model needs to be modified;
+            'run' - Runs the model;
+            'compare' - Compare the results of the runned model;
+            'plot' - Plots the necessary data for user visualization;
+            'consult' - Used to consult theoric information about the model.\n
             
-            IMPORTANT if the user has just request you to modify something without asking you to run the model, then
-            you should assume you should only modify it. If the user actually wanted to run, he will ask later. \n
+            Here are the main possibilities that you have available from the user input:\n
             
-            There are two types of USER_INPUT:
-            1. Gives you a direct command related to one or more of the available actions, such as asking you
-            to modify a value, or to run a model, to plot some specific data, compare the already available
-            results or consult details about the modeling process. In this case, you should only request the
-            actions the user has asked;
-            2. Gives you a scenario without specifying any command, asking for details about the scenario
-            for example. In this case you need to modify, run, analyze and plot the results to the user. \n
+            You will output ['modify': 'yes', 'run': 'yes', 'compare': 'yes', 'plot': 'yes', 'consult': 'no'] if USER_INPUT includes:
+            - 'What if...';
+            - 'What happens if...';
+            - 'How the model reacts if...';
+            - 'What changes if we...';
+            - Other general cases where the USER_INPUT includes any type of 'What if?'\n
+
+            You will output ['modify': 'no', 'run': 'no', 'compare': 'yes', 'plot': 'yes', 'consult': 'no'] if USER_INPUT includes:
+            - 'What changed in...';
+            - 'What happened to...';
+            - 'Was there a variation in...';
+            - Other general cases where the user asks about variation in results.\n
+            
+            You will output ['modify': 'no', 'run': 'no', 'compare': 'no', 'plot': 'yes', 'consult': 'no'] if USER_INPUT includes:
+            - 'Show me...';
+            - 'Plot the...';
+            - 'Create the visualization of...';
+            - Other general cases asking for data visualization.\n
+            
+            You will output ['modify': 'no', 'run': 'no', 'compare': 'no', 'plot': 'no', 'consult': 'yes'] if USER_INPUT includes:
+            - 'How is ... modeled?';
+            - 'Explain me about...';
+            - 'How does the...';
+            - 'What is the value of...';
+            - Other cases where the user asks questions about the modelling and not the results.\n
+            
+            If USER_QUERY includes any of the action names, you should only output that actions as 'yes'.\n
             
             You must output a JSON with the modified dictionary. \n
             
@@ -785,9 +798,17 @@ class RunModel(AgentBase):
                 model_instance = Model(conn=conn)
 
                 # Solve
-                if self.debug:
-                    self.helper.save_debug("\n#-- Solving model started --#")
-                model_instance.solve()
+                try:
+                    if self.debug:
+                        self.helper.save_debug("\n#-- Solving model started --#")
+                    
+                    with open(self.helper.get_debug_log_path(), 'a') as f:
+                        sys.stdout = f
+                        model_instance.solve()
+                    sys.stdout = sys.__stdout__
+                except Exception as e:
+                    sys.stdout = sys.__stdout__
+                    self.helper.save_debug(e)
 
                 # Save
                 if self.debug:
@@ -804,9 +825,11 @@ class RunModel(AgentBase):
                 disk_db_conn = sqlite3.connect(db_path)
                 conn.backup(disk_db_conn)
                 sim_status = 'runned'
+                self.helper.save_simulation_status('runned')
                 result = 'The model has runned successfully!'
-            except:
+            except Exception as e:
                 # TODO set a better way of defining infeasibility
+                self.helper.save_debug(e)
                 sim_status = 'infeasible'
                 result = 'Something went wrong and the model has not completely runned.'
         else:
@@ -814,7 +837,7 @@ class RunModel(AgentBase):
             result = 'There were no modifications to the model, no new simulation required'
             
         if self.debug:
-            self.helper.save_debug(f'{result}\n')
+            self.helper.save_debug(f'SIMULATION RESULTS: {result}\n')
         
         action_history['run'] = 'done'
         self.state['action_history'] = action_history
@@ -1154,7 +1177,8 @@ class ModifyModel(AgentBase):
                         message = f'The model was modified as follows:{result}'
                 else:
                     message = ['Failed to generate the correct modified set of parameters.']
-            except:
+            except Exception as e:
+                self.helper.save_debug(e)
                 message = ['Failed to modify the model, probably nothing to change']
             
             action_history['modify'] = 'done'
@@ -1162,11 +1186,14 @@ class ModifyModel(AgentBase):
         try:
             # Try to save, if it saves and the scenario was modified, mark it as modified
             workbook.save(filename=self.mod_model)
-        except:
+            self.state['model_modified'] = True
+        except Exception as e:
+            self.helper.save_debug(e)
             message = ['Failed to save the modifications']
             action_history['modify'] = 'done'
         
         if self.debug:
+            self.helper.save_debug(f'SELECTED PARAMS + VALUES: {new_params}')
             self.helper.save_debug(f'FINAL RESULTS OF MODIFICATION:\n{message}\n')
         
         self.state['num_steps'] = num_steps
@@ -1457,8 +1484,10 @@ class CompareModel(AgentBase):
         return PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
                 You are an specialist at checking the USER_INPUT to decide if the user wants to know the comparison
-                between the original model and the modified model, or if the user wants to check result variation
-                within different years of a single model. \n
+                between the original model and the modified model, which can be mainly identified by the user asking
+                for some parameters to be modified in the model, or if the user wants to check result variation
+                within different years of a single model, which normally happens when the user just ask about differences
+                in the results compared to now or to a specific year. \n
                 
                 Your only output should be a JSON object with a single key 'type', that can be either 'model_diff'
                 or 'yearly_diff'. \n
@@ -1487,7 +1516,8 @@ class CompareModel(AgentBase):
                 'conversion_process'@'commodity_in'@'commodity_out'). \n
                 
                 You also have access to the capital cost (CAPEX), operational cost (OPEX) and the total cost
-                (TOTEX = CAPEX + OPEX) of the model in COSTS_VARIATION. \n
+                (TOTEX = CAPEX + OPEX) of the model in COSTS_VARIATION. However, nevem mention them in the
+                output if the variation was -100%, something probably went wrong and that value is not valid. \n
                 
                 You must consider that the model was modified to account for the user's modification request shown
                 in USER_INPUT, then the modified model was simulated and the variation you have available in
@@ -1712,7 +1742,10 @@ class PlotModel(AgentBase):
         select_year_chain = select_year_prompt | self.json_model | JsonOutputParser()
 
         runs_dir_path = 'CESM/Runs'
-        simulation = f'{self.base_model.split("/")[-1][:-5]}-Base'
+        if self.helper.get_simulation_status() == 'runned':
+            simulation = f'{self.mod_model.split("/")[-1][:-5]}-Base'
+        else:
+            simulation = f'{self.base_model.split("/")[-1][:-5]}-Base'
 
         db_path = os.path.join(runs_dir_path, simulation, 'db.sqlite')
         conn = sqlite3.connect(db_path)
@@ -1725,14 +1758,15 @@ class PlotModel(AgentBase):
                             ['Bar', 'NEW_CAPACITY'],
                             ['Bar', 'CO2_EMISSION'],
                             ['Bar', 'PRIMARY_ENERGY'],
-                            ['TimeSeries', 'ENERGY_CONSUMPTION'],
-                            ['TimeSeries','ENERGY_PRODUCTION'],
-                            ['TimeSeries','POWER_CONSUMPTION'],
-                            ['TimeSeries','POWER_PRODUCTION'],
                             ['Sankey', 'SANKEY'],
                             ['SingleValue', 'CAPEX'],
                             ['SingleValue', 'OPEX'],
-                            ['SingleValue', 'TOTEX']]
+                            ['SingleValue', 'TOTEX'],
+                        #    ['TimeSeries', 'ENERGY_CONSUMPTION'],
+                        #    ['TimeSeries','ENERGY_PRODUCTION'],
+                        #    ['TimeSeries','POWER_CONSUMPTION'],
+                        #    ['TimeSeries','POWER_PRODUCTION'],
+                           ]
             
         commodities = [str(c) for c in dao.get_set("commodity")]
         commodities.remove('Dummy')
@@ -1782,7 +1816,7 @@ class PlotModel(AgentBase):
 
         if self.debug:
             self.helper.save_debug('---PLOT RESULTS---')
-            self.helper.save_debug(f'SELECTED PLOTS: {selected_plots}\n')
+            self.helper.save_debug(f'SELECTED PLOTS: {final_plots}\n')
 
         for plot in final_plots:
             plot_type = plot[0]
@@ -1819,8 +1853,8 @@ class PlotModel(AgentBase):
                     plotter.plot_single_value([getattr(p_type, plot_subtype)])
 
                 successful_plots = True
-            except:
-                pass
+            except Exception as e:
+                self.helper.save_debug(e)
             
         if successful_plots:
             message = """
@@ -1868,7 +1902,11 @@ class OutputGenerator(AgentBase):
             make up modifications or indicate plots for yourself. Other nodes
             already manipulated the model and showed plots to the user, you should
             just forward this information to the user. For listing information
-            about parameters you should show a topic list to the user if possible. \n
+            about parameters you should show a topic list to the user if possible.
+            Your main goal in this kind of scenario is to not only tell the user
+            what was done to the model, but also, provide as much information as
+            possible regarding the model results. Never sum up so much that the
+            details about simulation results are lost. \n
             
             CHAT_HISTORY can also be used to gather context and information about
             past messages exchanged between you and the user. \n

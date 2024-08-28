@@ -1,11 +1,10 @@
 import os
-import time
 import pickle
 import customtkinter
 
 from abc import ABC
 from tkinter import *
-from threading import Thread, Event
+from threading import Thread
 from llm_src.state import GraphState
 from langgraph.graph import StateGraph
 from llm_src.chat_llm import GraphBuilder
@@ -21,6 +20,7 @@ class Chat(ABC):
         self.recursion_limit = recursion_limit
         self.debug = debug
         self.helper = HelperFunctions()
+        self.helper.save_simulation_status('not_runned')
 
     def invoke(self, input) -> str:
         # run the agent
@@ -50,6 +50,7 @@ class App(customtkinter.CTk):
         
         customtkinter.set_appearance_mode('dark')
         self.debug = debug
+        self.helper = HelperFunctions()
         
         self.title("ESMChat")
         if self.debug:
@@ -215,7 +216,7 @@ class App(customtkinter.CTk):
         try:
             answer = self.chat.invoke(self.input_text)
         except Exception as e:
-            print(e)
+            self.helper.save_debug(e)
             answer = 'An error has ocurred, please try again'
         new_text = "\nASSISTANT:\n" + answer
         self.textbox.configure(state="normal")
