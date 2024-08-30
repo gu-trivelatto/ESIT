@@ -759,82 +759,77 @@ class RunModel(AgentBase):
         self.helper.save_chat_status('Running model')
         action_history = self.state['action_history']
         context = self.state['context']
-        model_modified = self.state['model_modified']
         num_steps = self.state['num_steps']
         num_steps += 1
         
         if self.debug:
             self.helper.save_debug('---SIMULATION RUNNER---')
         
-        if model_modified:
+        try:
+            model_name = self.mod_model.split('/')[-1]
+            model_name = model_name[:-5]
+            scenario = 'Base'
+            techmap_dir_path = Path("./CESM").joinpath('Data', 'Techmap')
+            ts_dir_path = Path("./CESM").joinpath('Data', 'TimeSeries')
+            runs_dir_path = Path("./CESM").joinpath('Runs')
+            
+            # Create a directory for the model if it does not exist
+            db_dir_path = runs_dir_path.joinpath(model_name+'-'+scenario)
+            if not runs_dir_path.exists():
+                os.mkdir(runs_dir_path)
+            
+            if not os.path.exists(db_dir_path):
+                os.mkdir(db_dir_path)
+
+            # Create and Run the model
+            conn = sqlite3.connect(":memory:")
+            parser = Parser(model_name, techmap_dir_path=techmap_dir_path, ts_dir_path=ts_dir_path, db_conn = conn, scenario = scenario)
+
+            # Parse
+            if self.debug:
+                self.helper.save_debug("\n#-- Parsing started --#")
+            parser.parse()
+
+            # Build
+            if self.debug:
+                self.helper.save_debug("\n#-- Building model started --#")
+            model_instance = Model(conn=conn)
+
+            # Solve
             try:
-                model_name = self.mod_model.split('/')[-1]
-                model_name = model_name[:-5]
-                scenario = 'Base'
-                techmap_dir_path = Path("./CESM").joinpath('Data', 'Techmap')
-                ts_dir_path = Path("./CESM").joinpath('Data', 'TimeSeries')
-                runs_dir_path = Path("./CESM").joinpath('Runs')
-                
-                # Create a directory for the model if it does not exist
-                db_dir_path = runs_dir_path.joinpath(model_name+'-'+scenario)
-                if not runs_dir_path.exists():
-                    os.mkdir(runs_dir_path)
-                
-                if not os.path.exists(db_dir_path):
-                    os.mkdir(db_dir_path)
-
-                # Create and Run the model
-                conn = sqlite3.connect(":memory:")
-                parser = Parser(model_name, techmap_dir_path=techmap_dir_path, ts_dir_path=ts_dir_path, db_conn = conn, scenario = scenario)
-
-                # Parse
                 if self.debug:
-                    self.helper.save_debug("\n#-- Parsing started --#")
-                parser.parse()
-
-                # Build
-                if self.debug:
-                    self.helper.save_debug("\n#-- Building model started --#")
-                model_instance = Model(conn=conn)
-
-                # Solve
-                try:
-                    if self.debug:
-                        self.helper.save_debug("\n#-- Solving model started --#")
-                    
-                    with open(self.helper.get_debug_log_path(), 'a') as f:
-                        sys.stdout = f
-                        model_instance.solve()
-                    sys.stdout = sys.__stdout__
-                except Exception as e:
-                    sys.stdout = sys.__stdout__
-                    self.helper.save_debug(e)
-
-                # Save
-                if self.debug:
-                    self.helper.save_debug("\n#-- Saving model started --#")
-                model_instance.save_output()
-
+                    self.helper.save_debug("\n#-- Solving model started --#")
                 
-                db_path = db_dir_path.joinpath('db.sqlite')
-                if db_path.exists():
-                    # Delete the file using unlink()
-                    db_path.unlink()
-                
-                # write the in-memory db to disk
-                disk_db_conn = sqlite3.connect(db_path)
-                conn.backup(disk_db_conn)
-                sim_status = 'runned'
-                self.helper.save_simulation_status('runned')
-                result = 'The model has runned successfully!'
+                with open(self.helper.get_debug_log_path(), 'a') as f:
+                    sys.stdout = f
+                    model_instance.solve()
+                sys.stdout = sys.__stdout__
             except Exception as e:
-                # TODO set a better way of defining infeasibility
+                sys.stdout = sys.__stdout__
                 self.helper.save_debug(e)
-                sim_status = 'infeasible'
-                result = 'Something went wrong and the model has not completely runned.'
-        else:
-            sim_status = 'no_run'
-            result = 'There were no modifications to the model, no new simulation required'
+
+            # Save
+            if self.debug:
+                self.helper.save_debug("\n#-- Saving model started --#")
+            model_instance.save_output()
+
+            
+            db_path = db_dir_path.joinpath('db.sqlite')
+            if db_path.exists():
+                # Delete the file using unlink()
+                db_path.unlink()
+            
+            # write the in-memory db to disk
+            disk_db_conn = sqlite3.connect(db_path)
+            conn.backup(disk_db_conn)
+            sim_status = 'runned'
+            self.helper.save_simulation_status('runned')
+            result = 'The model has runned successfully!'
+        except Exception as e:
+            # TODO set a better way of defining infeasibility
+            self.helper.save_debug(e)
+            sim_status = 'infeasible'
+            result = 'Something went wrong and the model has not completely runned.'
             
         if self.debug:
             self.helper.save_debug(f'SIMULATION RESULTS: {result}\n')
@@ -1597,7 +1592,7 @@ class CompareModel(AgentBase):
         # Doing that because the results can have different sets of CSs and years
         df_base, df_new = self.helper.fill_empty_rows(df_base, df_new)
         
-        if sim_status == 'runned':
+        if self.helper.get_simulation_status() == 'runned':
             prompt = self.get_analysis_type_prompt_template()
             llm_chain = prompt | self.json_model | JsonOutputParser()
             
