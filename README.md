@@ -11,7 +11,7 @@ Since there is a submodule included in this project, the cloning instructions ha
 If you are cloning this repository for the first time, you can run the following:
 
 ```console
-> git clone --recurse-submodules https://github.com/gu-trivelatto/master_thesis.git
+> git clone --recurse-submodules https://github.com/gu-trivelatto/ESIT.git
 ```
 
 This will ensure that the submodules are initialized and updated.
