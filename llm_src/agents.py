@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 import sqlite3
 
 from pathlib import Path
@@ -168,11 +169,11 @@ class ToolBypasser(AgentBase):
             the user to the tool or simply bypass it to generate a simple answer to the user. \n
             
             The cases where you will bypass to the output are when USER_INPUT contains:
-            - 'Hello!' or similars, without anything else;
+            - 'Hello!', 'Hi!', 'Hey!' or similars, without anything else;
             - 'How are you?' or similars, without anything else;
             - 'Who are you?' or similars;
             - 'What do you do?' or similars;
-            - 'Thank you!' or similars;
+            - 'Thank you!', 'Thanks!', 'Thanks a lot!' or similars;
             
             You must output a JSON with a single key 'is_conversation' containing exclusivelly the 
             selected type, which can be either true or false (use full lowercase for the boolean). \n
@@ -1018,11 +1019,13 @@ class ModifyModel(AgentBase):
             1. The user specified a value, in this case you need to use the exact values that were asked
             by the user;
             2. The user didn't specify a value but gave some kind of idea of the modification, for example
-            asked you to double the value, to reduce by 30%, to remove (in this case the value should go to 0),
-            in this case you need to figure out by how much the value will be modified;
-            3. The user didn't specify a value but asked for some indirect value related to other piece of
+            asked you to double the value, to reduce by 30%, in this case you need to figure out by how
+            much the value will be modified;
+            3. The user asked to remove something, in this case the values should go to 0 (keeping the
+            same format as received in CURRENT_VALUES);
+            4. The user didn't specify a value but asked for some indirect value related to other piece of
             information, in this case you can check CONTEXT for the necessary information;
-            4. In case you couldn't categorize the request as any of the past 3 cases, you should mark
+            5. In case you couldn't categorize the request as any of the past 4 cases, you should mark
             'success' as false and 'values' as an empty dict. \n
             
             There are two types of values that you can receive, numbers or lists. If the value is a number
@@ -1034,7 +1037,8 @@ class ModifyModel(AgentBase):
             If you need to output any value as 'nan', 'null', empty or similars, you should instead use
             and empty string as the output for that value. \n
             
-            Always use double quotes in the JSON object. \n
+            Always use double quotes in the JSON object. Never forget closing brackets, there should be
+            two of them for the format of JSON you are writting. \n
 
             <|eot_id|><|start_header_id|>user<|end_header_id|>
             USER_INPUT: {user_input} \n
@@ -1119,64 +1123,69 @@ class ModifyModel(AgentBase):
         # Load workbook for modifications
         workbook = load_workbook(filename=self.base_model)
         
-        if sheet == 'scenario':
-            # Modify the scenario parameters
-            new_params = scenario_param_chain.invoke({"user_input": user_input,
-                                                      "scen_params": scen_params})
-            
-            workbook, result = helper.modify_scenario_sheet(workbook, new_params)
-            if len(result) == 0:
-                message = 'Nothing was modified'
-            else:
-                message = f'The model was modified as follows:{result}'
-            
-            modifications_ready = mod_ready_chain.invoke({"user_input": user_input,
-                                                          "modifications": message})
-            if modifications_ready['ready']:
-                action_history['modify'] = 'done'
-            else:
-                action_history['modify'] = 'repeat'
-        else:
-            try:
-                # Defines the type of parametrization (defined or undefined)
-                parametrization_type = params_general_chain.invoke({"user_input": user_input})
-                parametrization_type = parametrization_type['parametrization_type']
-
-                # Selects the conversion subprocesses that match the user input
-                cs_selection = select_cs_chain.invoke({"user_input": user_input, "cs_list": CSs})
-                cs_selection = cs_selection['cs_selection']
-
-                if parametrization_type == 'defined':
-                    # Set the available parameters as being all of them for each conversion subprocess
-                    available_parameters = {cs: params for cs in cs_selection}
-                else:
-                    # Set the available parameters as being only the ones that are already filled for each cs
-                    available_parameters = helper.get_populated_params_and_cs_list(self.base_model, cs_selection)
-
-                # Selects the matching parameter from the set of available ones
-                param_selection = select_params_chain.invoke({"user_input": user_input, "param_list": available_parameters})
-                param_selection = param_selection['param_selection']
-
-                # Gets the current values for the selected pairs of cs and parameter
-                current_values = helper.get_values(self.base_model, param_selection)
-
-                # Feed the current data to the model, it will output the updated values in the same format
-                new_params = new_values_chain.invoke({"user_input": user_input, "context": context, "current_values": current_values})
+        for i in range(0,3):
+            if i != 0:
+                self.helper.save_debug(f'Model modification retries: ({i+1}/3)\n')
+            if sheet == 'scenario':
+                # Modify the scenario parameters
+                new_params = scenario_param_chain.invoke({"user_input": user_input,
+                                                        "scen_params": scen_params})
                 
-                # IF the agent indicates that the modification was successfull, then apply them to the sheet
-                if new_params['success']:
-                    workbook, result = helper.modify_cs_sheet(workbook, new_params)
-                    if len(result) == 0:
-                        message = 'Nothing was modified'
-                    else:
-                        message = f'The model was modified as follows:{result}'
+                workbook, result = helper.modify_scenario_sheet(workbook, new_params)
+                if len(result) == 0:
+                    message = 'Nothing was modified'
                 else:
-                    message = ['Failed to generate the correct modified set of parameters.']
-            except Exception as e:
-                self.helper.save_debug(e)
-                message = ['Failed to modify the model, probably nothing to change']
-            
-            action_history['modify'] = 'done'
+                    message = f'The model was modified as follows:{result}'
+                
+                modifications_ready = mod_ready_chain.invoke({"user_input": user_input,
+                                                            "modifications": message})
+                if modifications_ready['ready']:
+                    action_history['modify'] = 'done'
+                else:
+                    action_history['modify'] = 'repeat'
+                break
+            else:
+                try:
+                    # Defines the type of parametrization (defined or undefined)
+                    parametrization_type = params_general_chain.invoke({"user_input": user_input})
+                    parametrization_type = parametrization_type['parametrization_type']
+
+                    # Selects the conversion subprocesses that match the user input
+                    cs_selection = select_cs_chain.invoke({"user_input": user_input, "cs_list": CSs})
+                    cs_selection = cs_selection['cs_selection']
+
+                    if parametrization_type == 'defined':
+                        # Set the available parameters as being all of them for each conversion subprocess
+                        available_parameters = {cs: params for cs in cs_selection}
+                    else:
+                        # Set the available parameters as being only the ones that are already filled for each cs
+                        available_parameters = helper.get_populated_params_and_cs_list(self.base_model, cs_selection)
+
+                    # Selects the matching parameter from the set of available ones
+                    param_selection = select_params_chain.invoke({"user_input": user_input, "param_list": available_parameters})
+                    param_selection = param_selection['param_selection']
+
+                    # Gets the current values for the selected pairs of cs and parameter
+                    current_values = helper.get_values(self.base_model, param_selection)
+
+                    # Feed the current data to the model, it will output the updated values in the same format
+                    new_params = new_values_chain.invoke({"user_input": user_input, "context": context, "current_values": current_values})
+                    
+                    # IF the agent indicates that the modification was successfull, then apply them to the sheet
+                    if new_params['success']:
+                        workbook, result = helper.modify_cs_sheet(workbook, new_params)
+                        if len(result) == 0:
+                            message = 'Nothing was modified'
+                        else:
+                            message = f'The model was modified as follows:{result}'
+                    else:
+                        message = ['Failed to generate the correct modified set of parameters.']
+                except Exception as e:
+                    self.helper.save_debug(e)
+                    message = ['Failed to modify the model, probably nothing to change']
+                
+                action_history['modify'] = 'done'
+                break
                         
         try:
             # Try to save, if it saves and the scenario was modified, mark it as modified
@@ -1504,15 +1513,10 @@ class CompareModel(AgentBase):
                 You are an specialist at analyzing the variations in the model's output variables to summarize
                 the most relevant information given the USER_INPUT and the OUTPUT_VARIATIONS. \n
                 
-                OUTPUT_VARIATIONS is a dictionary that contains the percentual variation of the output variables
-                of a model after the user modified it and ran it again. The first layer has the output variables
-                as the key, the second has each year of the simulation as a key, and finally, the values of these
-                are the the variations for each subprocess (represented by a combination of 
-                'conversion_process'@'commodity_in'@'commodity_out'). \n
-                
-                You also have access to the capital cost (CAPEX), operational cost (OPEX) and the total cost
-                (TOTEX = CAPEX + OPEX) of the model in COSTS_VARIATION. However, nevem mention them in the
-                output if the variation was -100%, something probably went wrong and that value is not valid. \n
+                OUTPUT_VARIATIONS is a dictionary that contains the percentual variation of the output VARIABLE
+                of a model after the user modified it and ran it again. Each key of the dictionary represents
+                one year simulated by the model, the values of these years are the the variations for each 
+                subprocess (represented by a combination of 'conversion_process'@'commodity_in'@'commodity_out'). \n
                 
                 You must consider that the model was modified to account for the user's modification request shown
                 in USER_INPUT, then the modified model was simulated and the variation you have available in
@@ -1522,13 +1526,13 @@ class CompareModel(AgentBase):
 
                 <|eot_id|><|start_header_id|>user<|end_header_id|>
                 USER_INPUT: {user_input} \n
+                VARIABLE: {variable} \n
                 OUTPUT_VARIATIONS: {output_variations} \n
-                COSTS_VARIATION: {costs_variation} \n
                 Answer:
                 <|eot_id|>
                 <|start_header_id|>assistant<|end_header_id|>
                 """,
-                input_variables=["user_input","output_variations","costs_variation"],
+                input_variables=["user_input","variable","output_variations"],
             )
 
     def get_yearly_diff_prompt_template(self) -> PromptTemplate:
@@ -1537,10 +1541,9 @@ class CompareModel(AgentBase):
                 You are an specialist at analyzing the variations in the model's output variables to summarize
                 the most relevant information given the USER_INPUT and the YEARLY_VARIATIONS. \n
                 
-                YEARLY_VARIATIONS is a dictionary that contains the percentual variation of the output variables
-                throughout the different years of the model results. The first layer has the output variables
-                as the key, the second has each conversion subprocess (represented by a combination of 
-                'conversion_process'@'commodity_in'@'commodity_out') of the simulation as a key, and finally,
+                YEARLY_VARIATIONS is a dictionary that contains the percentual variation of the output VARIABLE
+                throughout the different years of the model results. Each key is one of the conversion subprocess
+                (represented by a combination of 'conversion_process'@'commodity_in'@'commodity_out') of the simulation,
                 the values of these are the the variations for each year. \n
                 
                 Using this context you should be able to give the user the main insights about the scenario
@@ -1548,20 +1551,45 @@ class CompareModel(AgentBase):
 
                 <|eot_id|><|start_header_id|>user<|end_header_id|>
                 USER_INPUT: {user_input} \n
-                YEARLY_VARIATIONS: {yearly_variations} \n
+                VARIABLE: {variable} \n
+                YEARLY_VARIATIONS: {output_variations} \n
                 Answer:
                 <|eot_id|>
                 <|start_header_id|>assistant<|end_header_id|>
                 """,
-                input_variables=["user_input","yearly_variations"],
+                input_variables=["user_input","variable","output_variations"],
             )
+        
+    def get_variations_summary(self) -> PromptTemplate:
+        return PromptTemplate(
+            template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+                You are an specialist at analyzing the textual explanations of the model variation provided
+                to you in VARIATIONS, and generating a full analysis that takes in account the user USER_INPUT. \n
+                
+                You may also have access to the variations in capital cost (CAPEX), operational cost (OPEX)
+                and total cost (TOTEX = CAPEX + OPEX) of the model in COSTS_VARIATION. However, never mention
+                them in the output if the variation was -100%, something probably went wrong and that value is
+                not valid, or if COST_VARIATION is empty, this means that you don't need it for the analysis. \n
+                
+                Using this context you should be able to give the user the main insights about the scenario
+                comparison that he requested. \n
+
+                <|eot_id|><|start_header_id|>user<|end_header_id|>
+                USER_INPUT: {user_input} \n
+                VARIATIONS: {variations} \n
+                COST_VARIATION: {cost_variation} \n
+                Answer:
+                <|eot_id|>
+                <|start_header_id|>assistant<|end_header_id|>
+                """,
+                input_variables=["user_input","variations","cost_variation"],
+        )
 
     def execute(self) -> GraphState:
         self.helper.save_chat_status('Comparing results')
         user_input = self.state['consolidated_input']
         context = self.state['context']
         action_history = self.state['action_history']
-        sim_status = self.state['sim_status']
         num_steps = self.state['num_steps']
         num_steps += 1
 
@@ -1601,22 +1629,38 @@ class CompareModel(AgentBase):
         else:
             type = 'yearly_diff'
 
-        # TODO implement verification of status beyond runned ('infeasible', 'failed', 'no_run')
-        if type == 'model_diff':
-            variations_costs = (df_costs_new / df_costs_base - 1) * 100
-            variations_dict = self.helper.get_models_variation(df_base, df_new, non_t_variables)
 
-            prompt = self.get_results_diff_prompt_template()
-            llm_chain = prompt | self.ht_model | StrOutputParser()
+        for i in range(0,3):
+            if i != 0:
+                self.helper.save_debug(f'Result comparison retries: ({i+1}/3)\n')
+            parcial_llm_output = {}
+            # TODO implement verification of status beyond runned ('infeasible', 'failed', 'no_run')
+            if type == 'model_diff':
+                variations_costs = (df_costs_new / df_costs_base - 1) * 100
+                cost_variation = {'OPEX': f'{variations_costs["OPEX"].values[0]:.2f}%',
+                                'CAPEX': f'{variations_costs["CAPEX"].values[0]:.2f}%',
+                                'TOTEX': f'{variations_costs["TOTEX"].values[0]:.2f}%'}
+                variations_dict = self.helper.get_models_variation(df_base, df_new, non_t_variables)
 
-            llm_output = llm_chain.invoke({"user_input": user_input, "output_variations": variations_dict, "costs_variation": variations_costs})
-        else:
-            variations_dict = self.helper.get_yearly_variations_from_results(df_base, non_t_variables)
+                prompt = self.get_results_diff_prompt_template()
+                llm_chain = prompt | self.ht_model | StrOutputParser()
+
+                for variable, variations in variations_dict.items():
+                    parcial_llm_output[variable] = llm_chain.invoke({"user_input": user_input, "variable": variable, "output_variations": variations})
+            else:
+                cost_variation = {}
+                variations_dict = self.helper.get_yearly_variations_from_results(df_base, non_t_variables)
+                
+                prompt = self.get_yearly_diff_prompt_template()
+                llm_chain = prompt | self.ht_model | StrOutputParser()
+
+                for variable, variations in variations_dict.items():
+                    parcial_llm_output[variable] = llm_chain.invoke({"user_input": user_input, "variable": variable, "output_variations": variations})
             
-            prompt = self.get_yearly_diff_prompt_template()
+            prompt = self.get_variations_summary()
             llm_chain = prompt | self.ht_model | StrOutputParser()
-
-            llm_output = llm_chain.invoke({"user_input": user_input, "yearly_variations": variations_dict})
+            llm_output = llm_chain.invoke({"user_input": user_input, 'variations': parcial_llm_output, 'cost_variation': cost_variation})
+            break
 
         if self.debug:
             self.helper.save_debug("---COMPARE RESULTS---")
@@ -1629,6 +1673,8 @@ class CompareModel(AgentBase):
         self.state['num_steps'] = num_steps
         
         return self.state
+
+# TODO check why sankey plots sometimes end up getting commodities
 
 class PlotModel(AgentBase):
     def get_prompt_template(self) -> PromptTemplate:
@@ -1778,7 +1824,7 @@ class PlotModel(AgentBase):
         for plot in selected_plots:
             if plot[0] == 'Sankey':
                 need_year_plots.append(plot + ['NO_COMMODITY'])
-            if plot[0] == 'SingleValue' or plot[1] in ['CO2_EMISSION', 'PRIMARY_ENERGY']:
+            elif plot[0] == 'SingleValue' or plot[1] in ['CO2_EMISSION', 'PRIMARY_ENERGY']:
                 final_plots.append(plot)
             else:
                 need_commodity_plots.append(plot)
@@ -1819,12 +1865,12 @@ class PlotModel(AgentBase):
             if len(plot) == 3:
                 commodity = plot[2]
                 if not(commodity in commodities) and not(commodity == 'NO_COMMODITY'):
-                    print(f'{commodity} not in {commodities}')
+                    self.helper.save_debug(f'{commodity} not in {commodities}')
                     continue
             if len(plot) == 4:
                 year = plot[3]
                 if not(year in years):
-                    print(f'{year} not in {years}')
+                    self.helper.save_debug(f'{year} not in {years}')
                     continue
             
             try:
@@ -1881,7 +1927,8 @@ class OutputGenerator(AgentBase):
             to use LLM agents to help users to analyze, manipulate and understand
             energy system models. You are the last agent of the tool, responsible
             for summing up the results generated by other agents in the output
-            to be given to the user. \n
+            to be given to the user. If the user asks about you, present yourself
+            as the tool itself, not as an agent. \n
             
             Given the USER_INPUT and a CONTEXT, generate an answer for the query
             asked by the user. You should make use of the provided information

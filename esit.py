@@ -1,4 +1,6 @@
 import os
+import time
+import click
 import pickle
 import customtkinter
 
@@ -45,14 +47,15 @@ class Chat(ABC):
         return value['final_answer']
                 
 class App(customtkinter.CTk):
-    def __init__(self, debug):
+    def __init__(self, debug, font_size):
         super().__init__()
         
         customtkinter.set_appearance_mode('dark')
         self.debug = debug
+        self.font_size = font_size
         self.helper = HelperFunctions()
         
-        self.title("ESMChat")
+        self.title("ESIT")
         if self.debug:
             self.geometry("1800x900")
         else:
@@ -67,10 +70,10 @@ class App(customtkinter.CTk):
                                                 corner_radius=8,
                                                 wrap='word',
                                                 state='disabled',
-                                                font=("", 16))
+                                                font=("", self.font_size))
         self.textbox.grid(row=0, column=1, rowspan=3, columnspan=3, padx=20, pady=(20, 0), sticky="nsew")
 
-        self.entry = customtkinter.CTkTextbox(master=self, height=80, font=("", 16), wrap='word')
+        self.entry = customtkinter.CTkTextbox(master=self, height=80, font=("", self.font_size), wrap='word')
         self.entry.grid(row=3, column=1, columnspan=2, padx=20, sticky="ew")
         self.entry.bind('<Return>', self.on_enter)
         self.entry.bind('<Shift-Return>', self.new_line)
@@ -79,7 +82,7 @@ class App(customtkinter.CTk):
                                               command=self.button_callback,
                                               text="Send",
                                               height=80,
-                                              font=("", 16))
+                                              font=("", self.font_size))
         self.button.grid(row=3, column=3, padx=20, pady=20, sticky="ew")
         
         if self.debug:
@@ -93,7 +96,7 @@ class App(customtkinter.CTk):
                                                           wrap='word',
                                                           state='disabled',
                                                           width=900,
-                                                          font=("Ubuntu Mono", 16))
+                                                          font=("Ubuntu Mono", self.font_size))
             self.debug_textbox.grid(row=0, column=0, rowspan=4, columnspan=4, padx=20, pady=20, sticky="nsew")
             
             # Tracking whether the user is at the bottom for each textbox
@@ -211,6 +214,7 @@ class App(customtkinter.CTk):
         return "break"
         
     def call_llm(self):
+        st = time.time()
         self.entry.configure(state="disabled")
         self.available = False
         try:
@@ -227,20 +231,25 @@ class App(customtkinter.CTk):
         self.available = True
         with open('metadata/chat_control.log', 'w') as f:
             f.write('idle')
-        if self.debug:
-            self.chat_running = False
+        self.chat_running = False
+        print(f"Execution finished in {time.time()-st:.2f} seconds")
         
         
         
     def set_chat(self, chat):
         self.chat = chat
-        
-if __name__ == '__main__':
+
+@click.command()
+@click.option('-d', '--debug', is_flag=True, help='Activate the debugger.')
+def main(debug):
+    print("Welcome to the Energy System Insight Tool (ESIT)")
     # TODO modify the way we get the path in CESM/core/input_parser.py
-    debug = True
-    app = App(debug)
+    app = App(debug, 22)
     graph = GraphBuilder('CESM/Data/Techmap', app, debug).build()
-    chat = Chat(graph, 25, debug)
+    chat = Chat(graph, 40, debug)
     app.set_chat(chat)
     app.mainloop()
+
+if __name__ == '__main__':
+    main()
     
