@@ -1786,7 +1786,7 @@ class PlotModel(AgentBase):
         if self.helper.get_simulation_status() == 'runned':
             simulation = f'{self.mod_model.split("/")[-1][:-5]}-Base'
         else:
-            simulation = f'{self.base_model.split("/")[-1][:-5]}_modified'
+            simulation = f'{self.base_model.split("/")[-1][:-5]}-Base'
 
         db_path = os.path.join(runs_dir_path, simulation, 'db.sqlite')
         conn = sqlite3.connect(db_path)
